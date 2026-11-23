@@ -280,100 +280,111 @@ def attempt_ticket_purchase(
 
             print(f"[DEBUG URL] URL após pesquisa: {page.url}")
 
-            # 2. Localizar o cartão exato do comboio Intercidades das `trip_time`
-            train_card = find_specific_train_card(page, trip_time)
-            if not train_card:
-                return False, f"Cartão individual do Intercidades das {trip_time} não encontrado.", None
 
-            card_text = train_card.inner_text()
-            # Sobe mais 2 níveis caso o bloco de tarifa/botão esteja no contentor pai da linha do comboio
-            row_container = train_card.locator("xpath=../..").first
-            if row_container.count() > 0 and len(row_container.inner_text()) < 1500:
-                train_card = row_container
-                card_text = train_card.inner_text()
-                print(f"[DEBUG COMBOIO EXPANDIDO] {card_text.replace(chr(10), ' | ')}")
-
-          
-
-            # 2. Localizar o cartão exato do comboio Intercidades
+            # 2. Localizar e selecionar o comboio pretendido
             train_card = find_specific_train_card(page, trip_time)
 
             if not train_card:
                 return False, (
-                    f"Cartão individual do Intercidades "
-                    f"das {trip_time} não encontrado."
+                    f"Comboio Intercidades das {trip_time} não encontrado."
                 ), None
 
-            card_text = train_card.inner_text()
-
-            # Expandir o contentor para incluir os botões da viagem
             row_container = train_card.locator("xpath=../..").first
 
             if row_container.count() > 0:
                 if len(row_container.inner_text()) < 1500:
                     train_card = row_container
-                    card_text = train_card.inner_text()
 
             print(
-                f"[DEBUG COMBOIO EXPANDIDO] "
-                f"{card_text.replace(chr(10), ' | ')}"
+                f"[DEBUG COMBOIO] "
+                f"{train_card.inner_text().replace(chr(10), ' | ')}"
             )
 
-            # Procurar especificamente o botão Selecionar ida
+            # Localizar exclusivamente o botão da viagem pretendida
             select_ida = train_card.locator(
                 "button:visible, a:visible, [role='button']:visible"
             ).filter(
-                has_text=re.compile(
-                    r"Selecionar ida",
-                    re.IGNORECASE
-                )
+                has_text=re.compile(r"Selecionar ida", re.IGNORECASE)
             ).first
 
-            # Alternativa: procurar o texto na página inteira
             if select_ida.count() == 0:
-                select_ida = page.get_by_text(
-                    "Selecionar ida",
-                    exact=True
-                ).last
+                return False, "Botão Selecionar ida não encontrado.", None
 
-            if select_ida.count() == 0:
-                return False, (
-                    "Botão 'Selecionar ida' não encontrado."
-                ), None
+            print("[IDA] A clicar em Selecionar ida.")
+            select_ida.click()
+            page.wait_for_timeout(2000)
 
-            print(
-                "[CLIQUE CARTÃO] A selecionar efetivamente "
-                "o botão 'Selecionar ida'."
+            # Verificar se existe um botão para avançar
+            continue_pattern = re.compile(
+                r"Continuar|Avançar|Seguinte|Prosseguir",
+                re.IGNORECASE
             )
 
-            select_ida.click()
-            page.wait_for_timeout(2500)
+            continue_btn = page.locator(
+                "button:visible, a:visible, [role='button']:visible"
+            ).filter(has_text=continue_pattern).last
 
-            print(f"[DEBUG URL APÓS SELEÇÃO] {page.url}")
+            if continue_btn.count() > 0:
+                print(
+                    f"[AVANÇAR] Botão encontrado: "
+                    f"{continue_btn.inner_text().strip()}"
+                )
 
-            # Verificar se avançou para o formulário
+                continue_btn.click()
+                page.wait_for_timeout(3500)
+
+                try:
+                    page.wait_for_load_state(
+                        "domcontentloaded",
+                        timeout=10000
+                    )
+                except PlaywrightTimeoutError:
+                    pass
+
+            else:
+                print(
+                    "[AVISO] Não foi encontrado botão de continuação "
+                    "após selecionar a ida."
+                )
+
+            # Verificar o estado real da página
+            print(f"[DEBUG URL ETAPA SEGUINTE] {page.url}")
+
+            page.wait_for_timeout(1500)
+
             visible_inputs = page.locator(
                 "input:visible, select:visible"
             )
 
             print(
-                f"[DEBUG APÓS SELEÇÃO] "
+                f"[DEBUG PASSAGEIROS] "
                 f"Inputs/Selects visíveis: {visible_inputs.count()}"
             )
 
             body_text = page.locator("body").inner_text()
 
-            print(
-                f"[DEBUG TEXTO APÓS SELEÇÃO] "
-                f"{body_text[:1200].replace(chr(10), ' | ')}"
-            )
-
             if visible_inputs.count() == 0:
+                visible_buttons = page.locator(
+                    "button:visible, [role='button']:visible"
+                )
+
+                button_texts = []
+                for i in range(visible_buttons.count()):
+                    try:
+                        txt = visible_buttons.nth(i).inner_text().strip()
+                        if txt:
+                            button_texts.append(txt)
+                    except Exception:
+                        pass
+
                 return False, (
-                    "A seleção da ida não apresentou "
-                    "campos de formulário. "
-                    f"URL atual: {page.url}"
+                    "Formulário do passageiro ainda não disponível. "
+                    f"URL: {page.url} | "
+                    f"Botões visíveis: {button_texts} | "
+                    f"Texto: {body_text[-1800:]}"
                 ), None
+
+            print("[PASSAGEIROS] Formulário detetado.")
 
             # 3. Preencher dados do passageiro
             print("[PASSAGEIROS] Formulário detetado.")
