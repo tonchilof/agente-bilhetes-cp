@@ -177,7 +177,8 @@ def find_specific_train_card(page, trip_time: str):
     except Exception:
         print(f"[DEBUG] A hora '{trip_time}' não ficou visível na página após 15s.")
         body_txt = page.locator("body").inner_text()
-        print(f"[DEBUG HORAS VISÍVEIS] {re.findall(r'\b\d{2}:\d{2}\b', body_txt)[:20]}")
+        horas_visiveis = re.findall(r"\b\d{2}:\d{2}\b", body_txt)[:20]
+        print(f"[DEBUG HORAS VISÍVEIS] {horas_visiveis}")
         return None
 
     # 2. Localiza todos os elementos que contêm a hora exata (ex: 19:45)
