@@ -1,201 +1,584 @@
+from __future__ import annotations
+
 import os
 import re
 import time
 import smtplib
-import requests
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from pathlib import Path
+from typing import Any
+from zoneinfo import ZoneInfo
+
+import requests
+from playwright.sync_api import (
+    Locator,
+    TimeoutError as PlaywrightTimeoutError,
+    sync_playwright,
+)
 
 LISBON_TZ = ZoneInfo("Europe/Lisbon")
+CP_URL = "https://cp.pt/pt/"
+GITHUB_API = "https://api.github.com"
 
 
-# ==============================================================================
-# 1. GESTÃO DE ESTADO (GITHUB REPOSITORY VARIABLES) E NOTIFICAÇÕES (SMTP)
-# ==============================================================================
+# =============================================================================
+# 1. ESTADO NO GITHUB E NOTIFICAÇÕES
+# =============================================================================
 
-def update_github_variable(var_name: str, value: str) -> None:
+def update_github_variable(var_name: str, value: str) -> bool:
     token = os.getenv("GH_PAT")
     repo = os.getenv("GITHUB_REPOSITORY")
-    if not token or not repo:
-        print(f"[AVISO] GH_PAT ou GITHUB_REPOSITORY em falta. Não foi possível gravar {var_name}={value}.")
-        return
 
-    url = f"https://api.github.com/repos/{repo}/actions/variables/{var_name}"
+    if not token or not repo:
+        print(f"[AVISO] GH_PAT ou GITHUB_REPOSITORY em falta. Não foi possível atualizar {var_name}.")
+        return False
+
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
-    resp = requests.patch(url, headers=headers, json={"name": var_name, "value": value}, timeout=15)
-    if resp.status_code == 404:
-        create_url = f"https://api.github.com/repos/{repo}/actions/variables"
-        resp = requests.post(create_url, headers=headers, json={"name": var_name, "value": value}, timeout=15)
+    payload = {"name": var_name, "value": value}
+    url = f"{GITHUB_API}/repos/{repo}/actions/variables/{var_name}"
 
-    if resp.status_code in (200, 201, 204):
-        print(f"[ESTADO] Variável {var_name} atualizada para: {value}")
-    else:
-        print(f"[ERRO API GITHUB] Falha ao atualizar {var_name}: {resp.status_code} - {resp.text}")
+    try:
+        response = requests.patch(url, headers=headers, json=payload, timeout=20)
+
+        if response.status_code == 404:
+            create_url = f"{GITHUB_API}/repos/{repo}/actions/variables"
+            response = requests.post(create_url, headers=headers, json=payload, timeout=20)
+
+        if response.status_code in (200, 201, 204):
+            print(f"[ESTADO] Variável {var_name} atualizada para {value}.")
+            return True
+
+        print(
+            f"[ERRO GITHUB] Não foi possível atualizar {var_name}: "
+            f"HTTP {response.status_code} - {response.text[:1000]}"
+        )
+        return False
+    except requests.RequestException as exc:
+        print(f"[ERRO GITHUB] Falha de ligação ao atualizar {var_name}: {exc}")
+        return False
 
 
-def send_email(subject: str, body: str, pdf_bytes: bytes | None = None, pdf_filename: str = "bilhete_cp.pdf") -> None:
+def send_email(
+    subject: str,
+    body: str,
+    pdf_bytes: bytes | None = None,
+    pdf_filename: str = "bilhete_cp.pdf",
+) -> bool:
     smtp_user = os.getenv("SMTP_USER")
     smtp_pass = os.getenv("SMTP_PASSWORD")
     notify_email = os.getenv("NOTIFY_EMAIL")
 
-    if not all([smtp_user, smtp_pass, notify_email]):
+    if not all((smtp_user, smtp_pass, notify_email)):
         print("[AVISO] Credenciais SMTP incompletas. E-mail não enviado.")
-        return
+        return False
 
-    msg = MIMEMultipart()
-    msg["From"] = smtp_user
-    msg["To"] = notify_email
-    msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain", "utf-8"))
+    message = MIMEMultipart()
+    message["From"] = smtp_user
+    message["To"] = notify_email
+    message["Subject"] = subject
+    message.attach(MIMEText(body, "plain", "utf-8"))
 
     if pdf_bytes:
         attachment = MIMEApplication(pdf_bytes, _subtype="pdf")
-        attachment.add_header("Content-Disposition", "attachment", filename=pdf_filename)
-        msg.attach(attachment)
+        attachment.add_header(
+            "Content-Disposition",
+            "attachment",
+            filename=pdf_filename,
+        )
+        message.attach(attachment)
 
     try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as server:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=25) as server:
             server.login(smtp_user, smtp_pass)
-            server.send_message(msg)
-        print(f"[EMAIL] Enviado com sucesso para {notify_email} | Assunto: {subject}")
-    except Exception as e:
-        print(f"[ERRO EMAIL] Falha ao enviar e-mail: {e}")
+            server.send_message(message)
+        print(f"[EMAIL] Enviado para {notify_email}. Assunto: {subject}")
+        return True
+    except Exception as exc:
+        print(f"[ERRO EMAIL] Não foi possível enviar o e-mail: {exc}")
+        return False
 
 
-# ==============================================================================
-# 2. LÓGICA DE NAVEGAÇÃO E COMPRA NO SITE DA CP
-# ==============================================================================
+# =============================================================================
+# 2. FUNÇÕES AUXILIARES PLAYWRIGHT
+# =============================================================================
+
+def locator_visible(locator: Locator, timeout_ms: int = 3000) -> bool:
+    try:
+        locator.wait_for(state="visible", timeout=timeout_ms)
+        return True
+    except PlaywrightTimeoutError:
+        return False
+    except Exception:
+        return False
+
+
+def first_existing(page, selectors: list[str]) -> Locator | None:
+    for selector in selectors:
+        locator = page.locator(selector).first
+        try:
+            if locator.count() > 0:
+                return locator
+        except Exception:
+            continue
+    return None
+
 
 def handle_cookies(page) -> None:
+    # Preferir rejeitar cookies opcionais. Se a opção não existir, aceitar para
+    # retirar o painel que impede a interação com o formulário.
+    selectors = [
+        "#onetrust-reject-all-handler",
+        "button:has-text('Rejeitar todos')",
+        "#onetrust-accept-btn-handler",
+        "button:has-text('Aceitar todos')",
+    ]
 
-    try:
-        cookie_btn = page.locator("#onetrust-reject-all-handler, #onetrust-accept-btn-handler").first
-        if cookie_btn.is_visible(timeout=4000):
-            cookie_btn.click()
-            page.wait_for_timeout(600)
-    except Exception:
-        pass
+    for selector in selectors:
+        button = page.locator(selector).first
+        if locator_visible(button, 1200):
+            try:
+                button.click(timeout=3000)
+                page.wait_for_timeout(500)
+                print(f"[COOKIES] Ação efetuada: {selector}")
+                return
+            except Exception:
+                continue
 
 
-def fill_station_input(page, input_locator, station_name: str) -> bool:
-    """Preenche a estação e garante que uma opção da lista suspensa é clicada (até 2 tentativas)."""
-    for attempt in range(2):
-        input_locator.click()
-        page.keyboard.press("Control+A")
-        page.keyboard.press("Backspace")
-        input_locator.press_sequentially(station_name, delay=90)
-        page.wait_for_timeout(1800)
+def dismiss_blocking_modal(page) -> bool:
+    """Fecha apenas diálogos informativos com um controlo de fecho explícito.
 
-        suggestion = page.locator(
-            "[role='option'], .ui-autocomplete li, [class*='autocomplete'] li, [class*='suggestion'], [class*='dropdown'] li"
-        ).filter(has_text=re.compile(re.escape(station_name), re.IGNORECASE)).first
+    Não clica em botões genéricos como Comprar, Continuar ou Confirmar, porque
+    esses controlos podem avançar ou concluir uma operação.
+    """
+    modal_selectors = [
+        "[role='dialog']:visible",
+        "[aria-modal='true']:visible",
+        ".modal.show:visible",
+        ".modal[open]:visible",
+    ]
+    close_selectors = [
+        "button[aria-label*='fechar' i]",
+        "button[title*='fechar' i]",
+        "button[aria-label*='close' i]",
+        "button[title*='close' i]",
+        "button:has-text('Fechar')",
+        "button:has-text('FECHAR')",
+        "button:has-text('Entendi')",
+        "button:has-text('OK')",
+        "button:has-text('Ok')",
+        "button:has-text('×')",
+        ".btn-close",
+        ".close",
+    ]
 
-        if suggestion.is_visible(timeout=3500):
-            suggestion.click()
-            page.wait_for_timeout(500)
-            print(f"[FORM] Estação selecionada na lista: {station_name}")
-            return True
+    for modal_selector in modal_selectors:
+        modals = page.locator(modal_selector)
+        try:
+            modal_count = min(modals.count(), 5)
+        except Exception:
+            continue
 
-        print(f"[AVISO FORM] Tentativa {attempt + 1}: lista não apareceu para '{station_name}', a tentar novamente...")
+        for index in range(modal_count):
+            modal = modals.nth(index)
+            if not locator_visible(modal, 500):
+                continue
+
+            close_button = None
+            for close_selector in close_selectors:
+                candidate = modal.locator(close_selector).first
+                try:
+                    if candidate.count() > 0 and locator_visible(candidate, 500):
+                        close_button = candidate
+                        break
+                except Exception:
+                    continue
+
+            if close_button is None:
+                modal_text = " ".join(modal.inner_text().split())[:250]
+                print(
+                    "[MODAL] Existe um diálogo visível sem botão de fecho seguro. "
+                    f"Não vou avançar. Conteúdo: {modal_text}"
+                )
+                return False
+
+            try:
+                close_button.click(timeout=3000)
+                modal.wait_for(state="hidden", timeout=5000)
+                page.wait_for_timeout(300)
+            except Exception as exc:
+                print(f"[MODAL] Não foi possível fechar o diálogo: {exc}")
+                return False
+
+    # Verificação adicional: não deixar um diálogo modal aberto por cima da página.
+    for selector in modal_selectors:
+        try:
+            candidates = page.locator(selector)
+            for index in range(min(candidates.count(), 5)):
+                if locator_visible(candidates.nth(index), 300):
+                    print("[MODAL] Continua a existir um diálogo a bloquear a página.")
+                    return False
+        except Exception:
+            pass
+
+    return True
+
+
+def fill_station_input(page, input_locator: Locator, station_name: str) -> bool:
+    """Preenche a estação e seleciona uma sugestão do autocomplete."""
+    if input_locator.count() == 0:
+        print(f"[FORM] Campo da estação não encontrado: {station_name}")
+        return False
+
+    suggestion_selectors = [
+        "[role='option']",
+        ".ui-autocomplete li",
+        "[class*='autocomplete'] li",
+        "[class*='suggestion']",
+        "[class*='dropdown'] li",
+    ]
+
+    for attempt in range(1, 4):
+        try:
+            input_locator.click(timeout=5000)
+            input_locator.fill("")
+            input_locator.press_sequentially(station_name, delay=75)
+            page.wait_for_timeout(1300)
+
+            suggestions = page.locator(", ".join(suggestion_selectors)).filter(
+                has_text=re.compile(re.escape(station_name), re.IGNORECASE)
+            )
+
+            if suggestions.count() > 0:
+                suggestion = suggestions.first
+                if locator_visible(suggestion, 2500):
+                    suggestion.click(timeout=5000)
+                    page.wait_for_timeout(400)
+                    print(f"[FORM] Estação selecionada: {station_name}")
+                    return True
+
+            print(f"[AVISO FORM] Tentativa {attempt}: sugestão não encontrada para '{station_name}'.")
+        except Exception as exc:
+            print(f"[AVISO FORM] Tentativa {attempt} para '{station_name}': {exc}")
 
     return False
 
 
-def select_coach_and_seat(page) -> str:
-    info_lugar = "Lugar aleatório atribuído pelo sistema"
+def find_specific_train_card(page, trip_time: str) -> Locator | None:
+    """Localiza o cartão Intercidades que contém a hora indicada."""
+    time_node = page.get_by_text(trip_time, exact=True).first
+
     try:
-        coach_elements = page.locator("[data-coach], .coach-selector button, .carruagem-item, select[name*='coach'] option")
-        count = coach_elements.count()
-
-        if count > 0:
-            selected_coach = None
-            for target_coach in ["24", "23"]:
-                candidate = page.locator(
-                    f"[data-coach='{target_coach}'], button:has-text('{target_coach}'), .carruagem-item:has-text('{target_coach}')"
-                ).first
-                if candidate.count() > 0 and candidate.is_enabled():
-                    candidate.click()
-                    selected_coach = target_coach
-                    page.wait_for_timeout(1000)
-                    break
-
-            if not selected_coach:
-                last_coach = coach_elements.last
-                selected_coach = last_coach.inner_text().strip()
-                last_coach.click()
-                page.wait_for_timeout(1000)
-
-            for target_seat in ["68", "63"]:
-                seat_locator = page.locator(
-                    f"[data-seat='{target_seat}']:not(.occupied):not(.unavailable):not([disabled]), "
-                    f".seat.available:has-text('{target_seat}'), "
-                    f"button.lugar-livre:has-text('{target_seat}')"
-                ).first
-                if seat_locator.count() > 0 and seat_locator.is_visible():
-                    seat_locator.click()
-                    info_lugar = f"Carruagem {selected_coach}, Lugar {target_seat}"
-                    print(f"[LUGAR] Selecionado com sucesso: {info_lugar}")
-                    return info_lugar
-
-            info_lugar = f"Carruagem {selected_coach} (lugares 68/63 indisponíveis; mantido lugar automático)"
-    except Exception as e:
-        print(f"[AVISO LUGAR] Não foi possível personalizar lugar ({e}). A avançar com lugar automático.")
-
-    return info_lugar
-
-
-def verify_zero_euro_total(page) -> bool:
-    page_text = page.locator("body").inner_text()
-    matches = re.findall(r"(?:Total|A pagar|Valor total)[^\d€]{0,25}(\d+[.,]\d{2})\s*€", page_text, re.IGNORECASE)
-    if not matches:
-        matches = re.findall(r"(\d+[.,]\d{2})\s*€", page_text)
-
-    if not matches:
-        print("[SEGURANÇA] Não foi possível confirmar o valor total no ecrã. Abortar por precaução.")
-        return False
-
-    final_amount = matches[-1].replace(",", ".")
-    print(f"[SEGURANÇA] Valor total detetado: {final_amount} €")
-    return float(final_amount) == 0.0
-
-
-def find_specific_train_card(page, trip_time: str):
-    """
-    Atravessa o Shadow DOM do novo portal da CP partindo diretamente do nó de texto `trip_time`
-    e sobe na árvore DOM até encontrar o cartão do comboio com o botão de seleção.
-    """
-    time_node = page.locator(f"text='{trip_time}'").first
-    try:
-        time_node.wait_for(state="visible", timeout=15000)
-        page.wait_for_timeout(1500)
-    except Exception:
-        print(f"[DEBUG] A hora '{trip_time}' não ficou visível na página após 15s.")
+        time_node.wait_for(state="visible", timeout=20000)
+        page.wait_for_timeout(700)
+    except PlaywrightTimeoutError:
+        print(f"[COMBOIO] A hora {trip_time} não apareceu nos resultados.")
         return None
 
-    # Sobe níveis na árvore DOM a partir do texto '19:45' até encontrar o cartão completo do comboio
-    for level in range(1, 7):
+    # Os locators de texto do Playwright atravessam Shadow DOM aberto. O XPath
+    # é usado apenas a partir do nó encontrado, como no portal atual observado.
+    for level in range(1, 8):
         ancestor = time_node.locator(f"xpath={'../' * level}.").first
         try:
-            txt = ancestor.inner_text()
-            # O cartão individual de um comboio tem entre 30 e 1200 caracteres e menciona IC / Intercidades
-            if 30 <= len(txt) <= 1200 and re.search(r"Intercidades|\bIC\b", txt, re.IGNORECASE):
-                print(f"[DEBUG] Cartão encontrado no nível {level} acima de '{trip_time}'.")
+            text = ancestor.inner_text(timeout=2500)
+            if (
+                30 <= len(text) <= 1800
+                and re.search(r"Intercidades|\bIC\b", text, re.IGNORECASE)
+                and trip_time in text
+            ):
+                print(f"[COMBOIO] Cartão identificado no nível {level}.")
                 return ancestor
         except Exception:
             continue
 
-    # Fallback: devolve o contentor 3 níveis acima da hora para clicar no cartão/botão
-    print(f"[DEBUG] A devolver contentor pai direto (nível 3) de '{trip_time}'.")
-    return time_node.locator("xpath=../../..").first
+    print(f"[COMBOIO] Não foi possível identificar o cartão Intercidades das {trip_time}.")
+    return None
 
+
+def select_coach_and_seat(page) -> str:
+    """Tenta escolher as carruagens/lugares preferidos; mantém automático se não der."""
+    default_message = "Lugar automático atribuído pelo sistema"
+
+    try:
+        coach_candidates = [
+            "[data-coach]",
+            ".coach-selector button",
+            ".carruagem-item",
+            "button[aria-label*='carruagem' i]",
+        ]
+        coach_locator = page.locator(", ".join(coach_candidates))
+
+        selected_coach: str | None = None
+        for coach_number in ("24", "23"):
+            candidate = page.locator(
+                f"[data-coach='{coach_number}'], "
+                f".carruagem-item:has-text('{coach_number}'), "
+                f"button[aria-label*='carruagem {coach_number}' i]"
+            ).first
+            try:
+                if candidate.count() and locator_visible(candidate, 800) and candidate.is_enabled():
+                    candidate.click(timeout=3000)
+                    selected_coach = coach_number
+                    page.wait_for_timeout(700)
+                    break
+            except Exception:
+                continue
+
+        if selected_coach is None and coach_locator.count() > 0:
+            # Não assumir que o último elemento é uma carruagem válida se for
+            # apenas uma opção de um <select> ou um elemento oculto.
+            for index in range(coach_locator.count() - 1, -1, -1):
+                candidate = coach_locator.nth(index)
+                try:
+                    if locator_visible(candidate, 300) and candidate.is_enabled():
+                        candidate.click(timeout=3000)
+                        selected_coach = "selecionada automaticamente"
+                        page.wait_for_timeout(700)
+                        break
+                except Exception:
+                    continue
+
+        for seat_number in ("68", "63"):
+            seat = page.locator(
+                f"[data-seat='{seat_number}']:not(.occupied):not(.unavailable):not([disabled]), "
+                f".seat.available:has-text('{seat_number}'), "
+                f"button.lugar-livre:has-text('{seat_number}')"
+            ).first
+            try:
+                if seat.count() and locator_visible(seat, 700) and seat.is_enabled():
+                    seat.click(timeout=3000)
+                    result = f"Carruagem {selected_coach or 'atribuída pelo sistema'}, Lugar {seat_number}"
+                    print(f"[LUGAR] Selecionado: {result}")
+                    return result
+            except Exception:
+                continue
+
+        if selected_coach:
+            return f"Carruagem {selected_coach}; lugar automático (68/63 indisponíveis)"
+
+    except Exception as exc:
+        print(f"[AVISO LUGAR] Não foi possível personalizar o lugar: {exc}")
+
+    return default_message
+
+
+def parse_euro_amount(raw_amount: str) -> float | None:
+    value = raw_amount.strip().replace("\u00a0", "").replace(" ", "")
+    if "," in value and "." in value:
+        # Em Portugal, o ponto costuma separar milhares e a vírgula os cêntimos.
+        value = value.replace(".", "").replace(",", ".")
+    elif "," in value:
+        value = value.replace(",", ".")
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def verify_zero_euro_total(page) -> bool:
+    """Só aceita 0,00 € quando o montante aparece associado a um rótulo de total."""
+    try:
+        body_text = page.locator("body").inner_text(timeout=7000)
+    except Exception as exc:
+        print(f"[SEGURANÇA] Não foi possível ler o resumo da compra: {exc}")
+        return False
+
+    normalized = re.sub(r"\s+", " ", body_text)
+    amount_pattern = r"(?:€\s*)?(\d{1,3}(?:[.\s]\d{3})*(?:[,.]\d{2})|\d+[,.]\d{2})\s*€?"
+    label_pattern = re.compile(
+        rf"(?:Total(?:\s+(?:a\s+pagar|da\s+viagem|da\s+compra))?|Valor\s+total|A\s+pagar)"
+        rf"\s*[:\-]?\s*.{{0,45}}?{amount_pattern}",
+        re.IGNORECASE,
+    )
+
+    matches = list(label_pattern.finditer(normalized))
+    if not matches:
+        print("[SEGURANÇA] Não foi encontrado um valor associado ao rótulo Total/A pagar. Compra abortada.")
+        return False
+
+    amounts: list[float] = []
+    for match in matches:
+        amount = parse_euro_amount(match.group(1))
+        if amount is not None:
+            amounts.append(amount)
+
+    if not amounts:
+        print("[SEGURANÇA] O total foi encontrado, mas não foi possível interpretar o montante.")
+        return False
+
+    final_amount = amounts[-1]
+    print(f"[SEGURANÇA] Total associado ao resumo: {final_amount:.2f} €")
+    return abs(final_amount) < 0.005
+
+
+def find_visible_button(page, labels: list[str]) -> Locator | None:
+    for label in labels:
+        regex = re.compile(rf"^\s*{re.escape(label)}\s*$", re.IGNORECASE)
+        for role in ("button", "link"):
+            candidate = page.get_by_role(role, name=regex).last
+            try:
+                if candidate.count() > 0 and locator_visible(candidate, 700):
+                    return candidate
+            except Exception:
+                pass
+    return None
+
+
+def fill_required_field(page, selectors: list[str], value: str, field_label: str) -> bool:
+    locator = first_existing(page, selectors)
+    if locator is None or not locator_visible(locator, 3500):
+        print(f"[PASSAGEIRO] Campo obrigatório não encontrado: {field_label}")
+        return False
+
+    try:
+        locator.fill(value, timeout=5000)
+        return True
+    except Exception as exc:
+        print(f"[PASSAGEIRO] Não foi possível preencher {field_label}: {exc}")
+        return False
+
+
+def select_green_pass(page) -> bool:
+    select_locator = first_existing(
+        page,
+        [
+            "select[name*='desconto' i]",
+            "select[id*='desconto' i]",
+            "select[name*='tarifa' i]",
+        ],
+    )
+
+    if select_locator is not None and locator_visible(select_locator, 1500):
+        try:
+            options = select_locator.locator("option").all_text_contents()
+            matching_option = next(
+                (option.strip() for option in options if "Passe Ferroviário Verde" in option),
+                None,
+            )
+            if matching_option:
+                select_locator.select_option(label=matching_option)
+                print("[DESCONTO] Passe Ferroviário Verde selecionado.")
+                return True
+        except Exception as exc:
+            print(f"[DESCONTO] Falha ao selecionar a opção no menu: {exc}")
+
+    trigger = first_existing(
+        page,
+        [
+            "button:has-text('Desconto')",
+            "button:has-text('Sem desconto')",
+            "[aria-label*='Desconto' i]",
+            "label:has-text('Desconto')",
+        ],
+    )
+
+    if trigger is not None and locator_visible(trigger, 2500):
+        try:
+            trigger.click(timeout=3000)
+            page.wait_for_timeout(500)
+            option = page.get_by_text("Passe Ferroviário Verde", exact=False).last
+            if locator_visible(option, 2500):
+                option.click(timeout=3000)
+                print("[DESCONTO] Passe Ferroviário Verde selecionado.")
+                return True
+        except Exception as exc:
+            print(f"[DESCONTO] Falha ao abrir/selecionar desconto: {exc}")
+
+    print("[DESCONTO] Não foi possível selecionar Passe Ferroviário Verde.")
+    return False
+
+
+def accept_terms_if_present(page) -> bool:
+    terms_pattern = re.compile(r"termos|condições gerais|condicoes gerais", re.IGNORECASE)
+    labels = page.locator("label").filter(has_text=terms_pattern)
+
+    try:
+        for index in range(labels.count()):
+            label = labels.nth(index)
+            checkbox = label.locator("input[type='checkbox']").first
+            if checkbox.count() == 0:
+                checkbox = label.get_by_role("checkbox").first
+            if checkbox.count() > 0:
+                try:
+                    if not checkbox.is_checked():
+                        # Em muitos formulários o input está visualmente oculto;
+                        # clicar no respetivo label é mais fiável e não toca nos
+                        # checkboxes de publicidade.
+                        label.click(timeout=3000)
+                    if checkbox.is_checked():
+                        return True
+                except Exception:
+                    try:
+                        checkbox.check(timeout=3000, force=True)
+                        if checkbox.is_checked():
+                            return True
+                    except Exception:
+                        continue
+    except Exception:
+        pass
+
+    # Fallback pelo nome acessível, sem selecionar checkboxes de marketing.
+    checkbox = page.get_by_role(
+        "checkbox",
+        name=re.compile(r"termos|condições gerais|condicoes gerais", re.IGNORECASE),
+    ).first
+    try:
+        if checkbox.count() > 0 and locator_visible(checkbox, 700):
+            if not checkbox.is_checked():
+                checkbox.check(timeout=3000)
+            return True
+    except Exception:
+        pass
+
+    # Algumas versões do portal não apresentam checkbox nesta etapa.
+    print("[TERMOS] Não foi encontrado um checkbox de termos identificado por texto.")
+    return False
+
+
+def download_ticket_pdf(page) -> bytes | None:
+    download_button = first_existing(
+        page,
+        [
+            "a:has-text('PDF')",
+            "button:has-text('PDF')",
+            "a:has-text('Descarregar')",
+            "button:has-text('Descarregar')",
+            "a:has-text('Bilhete')",
+        ],
+    )
+
+    if download_button is None or not locator_visible(download_button, 4000):
+        print("[PDF] Não foi encontrado um botão de descarga do bilhete.")
+        return None
+
+    try:
+        with page.expect_download(timeout=15000) as download_info:
+            download_button.click(timeout=5000)
+        download = download_info.value
+        download_path = download.path()
+        if not download_path:
+            return None
+        data = Path(download_path).read_bytes()
+        if not data.startswith(b"%PDF"):
+            print("[PDF] O ficheiro descarregado não parece ser um PDF válido.")
+            return None
+        print(f"[PDF] Bilhete descarregado ({len(data)} bytes).")
+        return data
+    except Exception as exc:
+        print(f"[PDF] Não foi possível descarregar o bilhete: {exc}")
+        return None
+
+
+# =============================================================================
+# 3. PROCESSO DE PESQUISA E EMISSÃO
+# =============================================================================
 
 def attempt_ticket_purchase(
     origin: str,
@@ -204,367 +587,421 @@ def attempt_ticket_purchase(
     trip_time: str,
     wait_until_dt: datetime | None = None,
 ) -> tuple[bool, str, bytes | None]:
-    pass_code = os.environ["CP_PASS_CODE"]
-    passenger_name = os.environ["PASSENGER_NAME"]
-    passenger_id = os.environ["PASSENGER_ID_NUMBER"]
-    passenger_email = os.environ["PASSENGER_EMAIL"]
+    required_env = (
+        "CP_PASS_CODE",
+        "PASSENGER_NAME",
+        "PASSENGER_ID_NUMBER",
+        "PASSENGER_EMAIL",
+    )
+    missing = [name for name in required_env if not os.getenv(name)]
+    if missing:
+        return False, f"Variáveis de passageiro em falta: {', '.join(missing)}", None
 
-    dt_obj = datetime.strptime(trip_date, "%Y-%m-%d")
-    cp_date_str = dt_obj.strftime("%d/%m/%Y")
+    pass_code = os.environ["CP_PASS_CODE"].strip()
+    passenger_name = os.environ["PASSENGER_NAME"].strip()
+    passenger_id = os.environ["PASSENGER_ID_NUMBER"].strip()
+    passenger_email = os.environ["PASSENGER_EMAIL"].strip()
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            locale="pt-PT",
-            timezone_id="Europe/Lisbon",
-            viewport={"width": 1366, "height": 900},
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/130.0.0.0 Safari/537.36"
-            ),
-        )
-        page = context.new_page()
+    try:
+        date_obj = datetime.strptime(trip_date, "%Y-%m-%d")
+    except ValueError:
+        return False, "TRIP_DATE tem de estar no formato AAAA-MM-DD.", None
 
+    cp_date_str = date_obj.strftime("%d/%m/%Y")
+
+    with sync_playwright() as playwright:
+        browser = None
+        context = None
+        final_submit_attempted = False
         try:
-            print(f"[NAVEGAÇÃO] A aceder a https://cp.pt/pt/ para {origin} -> {destination} ({cp_date_str} às {trip_time})")
-            page.goto("https://cp.pt/pt/", wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(2000)
+            browser = playwright.chromium.launch(headless=True)
+            context = browser.new_context(
+                locale="pt-PT",
+                timezone_id="Europe/Lisbon",
+                viewport={"width": 1440, "height": 1000},
+                accept_downloads=True,
+            )
+            page = context.new_page()
+            page.set_default_timeout(8000)
+            page.set_default_navigation_timeout(30000)
+
+            print(
+                f"[NAVEGAÇÃO] A abrir {CP_URL}: {origin} -> {destination} "
+                f"({cp_date_str} às {trip_time})."
+            )
+            page.goto(CP_URL, wait_until="domcontentloaded")
+            page.wait_for_timeout(1800)
             handle_cookies(page)
 
-            # 1. Preencher formulário de pesquisa
-            text_inputs = page.locator("input[type='text']:visible")
-            origin_input = page.locator("input[placeholder*='Origem' i], input[aria-label*='Origem' i], input[name*='origem' i]").first
-            dest_input = page.locator("input[placeholder*='Destino' i], input[aria-label*='Destino' i], input[name*='destino' i]").first
-
-            if origin_input.count() == 0 and text_inputs.count() >= 2:
-                origin_input = text_inputs.nth(0)
-                dest_input = text_inputs.nth(1)
-
-            ok_origin = fill_station_input(page, origin_input, origin)
-            ok_dest = fill_station_input(page, dest_input, destination)
-
-            if not (ok_origin and ok_dest):
-                return False, f"Falha ao selecionar estações na lista (origem={ok_origin}, destino={ok_dest}).", None
-
-            date_input = page.locator(
-                "input[placeholder*='Data' i], input[aria-label*='Data' i], input[name*='data' i], input[placeholder*='dd/mm' i]"
-            ).first
-            if date_input.count() == 0 and text_inputs.count() >= 3:
-                date_input = text_inputs.nth(2)
-
-            if date_input.count() > 0:
-                date_input.click()
-                page.keyboard.press("Control+A")
-                page.keyboard.press("Backspace")
-                date_input.press_sequentially(cp_date_str, delay=70)
-                page.keyboard.press("Tab")
-                print(f"[FORM] Data preenchida: {cp_date_str}")
-
-            if wait_until_dt:
-                now = datetime.now(LISBON_TZ)
-                seconds_to_wait = (wait_until_dt - now).total_seconds()
-                if 0 < seconds_to_wait <= 660:
-                    print(f"[SYNC] A aguardar {seconds_to_wait:.2f}s até à abertura exata ({wait_until_dt.strftime('%H:%M:%S')})...")
-                    time.sleep(seconds_to_wait)
-
-            search_btn = page.locator("button.search-button, button:has-text('Pesquisar')").first
-            if search_btn.is_disabled():
-                return False, "Botão 'Pesquisar' permaneceu desativado após preenchimento.", None
-
-            search_btn.click()
-            page.wait_for_timeout(4000)
-            try:
-                page.wait_for_load_state("networkidle", timeout=15000)
-            except Exception:
-                pass
-
-            print(f"[DEBUG URL] URL após pesquisa: {page.url}")
-
-
-            # 2. Selecionar comboio e avançar para a compra
-
-            train_card = find_specific_train_card(page, trip_time)
-
-            if not train_card:
-                return False, (
-                    f"Comboio Intercidades das {trip_time} não encontrado."
-                ), None
-
-            row_container = train_card.locator("xpath=../..").first
-
-            if row_container.count() > 0:
-                if len(row_container.inner_text()) < 1500:
-                    train_card = row_container
-
-            print(
-                f"[DEBUG COMBOIO] "
-                f"{train_card.inner_text().replace(chr(10), ' | ')}"
+            # -----------------------------------------------------------------
+            # A. Preencher origem, destino e data
+            # -----------------------------------------------------------------
+            visible_text_inputs = page.locator("input[type='text']:visible")
+            origin_input = first_existing(
+                page,
+                [
+                    "input[placeholder*='Origem' i]",
+                    "input[aria-label*='Origem' i]",
+                    "input[name*='origem' i]",
+                    "input[id*='origem' i]",
+                ],
+            )
+            destination_input = first_existing(
+                page,
+                [
+                    "input[placeholder*='Destino' i]",
+                    "input[aria-label*='Destino' i]",
+                    "input[name*='destino' i]",
+                    "input[id*='destino' i]",
+                ],
             )
 
-            select_ida = train_card.locator(
-                "button:visible, a:visible, [role='button']:visible"
-            ).filter(
-                has_text=re.compile(r"Selecionar ida", re.IGNORECASE)
-            ).first
+            if origin_input is None and visible_text_inputs.count() >= 2:
+                origin_input = visible_text_inputs.nth(0)
+            if destination_input is None and visible_text_inputs.count() >= 2:
+                destination_input = visible_text_inputs.nth(1)
 
-            if select_ida.count() == 0:
-                return False, "Botão Selecionar ida não encontrado.", None
+            if origin_input is None or destination_input is None:
+                return False, "Não foram encontrados os campos de origem e destino.", None
 
-            print("[IDA] A selecionar o comboio.")
-            select_ida.click(timeout=10000)
-
-            try:
-                page.get_by_text(
-                    "Remover seleção",
-                    exact=True
-                ).last.wait_for(state="visible", timeout=10000)
-
-                print("[IDA] Seleção confirmada.")
-
-            except PlaywrightTimeoutError:
-                return False, (
-                    "A CP não confirmou a seleção do comboio."
-                ), None
-
-            page.wait_for_timeout(1000)
-
-            # Fechar eventuais modais que bloqueiem a compra
-            if not dismiss_blocking_modal(page):
-                return False, (
-                    "Modal da CP impede a interação com o botão Comprar."
-                ), None
-
-            # Procurar o botão Comprar
-            buy_pattern = re.compile(
-                r"^\s*Comprar\s*$",
-                re.IGNORECASE
-            )
-
-            buy_button = page.get_by_role(
-                "button",
-                name=buy_pattern
-            ).last
-
-            if buy_button.count() == 0:
-                buy_button = page.get_by_role(
-                    "link",
-                    name=buy_pattern
-                ).last
-
-            if buy_button.count() == 0:
-                buy_button = page.get_by_text(
-                    "Comprar",
-                    exact=True
-                ).last
-
-            try:
-                buy_button.wait_for(
-                    state="visible",
-                    timeout=10000
-                )
-            except PlaywrightTimeoutError:
-                return False, "Botão Comprar não encontrado.", None
-
-            # Confirmar novamente que não existe um modal por cima
-            if not dismiss_blocking_modal(page):
-                return False, (
-                    "Modal continua a bloquear o botão Comprar."
-                ), None
-
-            buy_button.scroll_into_view_if_needed()
-
-            print("[COMPRA] A clicar no botão Comprar.")
-
-            try:
-                buy_button.click(timeout=8000)
-            except Exception as e:
-                return False, (
-                    f"Não foi possível clicar em Comprar: {e}"
-                ), None
-
-            page.wait_for_timeout(3500)
-
-            try:
-                page.wait_for_load_state(
-                    "domcontentloaded",
-                    timeout=10000
-                )
-            except PlaywrightTimeoutError:
-                pass
-
-            page.wait_for_timeout(1500)
-
-            print(f"[DEBUG URL COMPRA] {page.url}")
-
-            body_text = page.locator("body").inner_text()
-
-            print(
-                f"[DEBUG ECRÃ COMPRA] "
-                f"{body_text[:2000].replace(chr(10), ' | ')}"
-            )
-
-            visible_inputs = page.locator(
-                "input:visible, select:visible, textarea:visible"
-            )
-
-            print(
-                f"[DEBUG PASSAGEIROS] "
-                f"Inputs/Selects visíveis: {visible_inputs.count()}"
-            )
-
-            if visible_inputs.count() == 0:
-                return False, (
-                    "Formulário do passageiro não apresentado. "
-                    f"URL: {page.url} | "
-                    f"Ecrã: {body_text[-1500:]}"
-                ), None
-
-            print("[PASSAGEIROS] Formulário detetado.")
-
-
-            
-            # 3. Preencher dados do passageiro e Passe Ferroviário Verde
-
-
-            print("[PASSAGEIROS] Formulário detetado.")
-
-
-            page.wait_for_timeout(1500)
-
-            # Procura botão de avançar / comprar (pode aparecer só após selecionar a linha/tarifa)
-            continue_btn = page.locator(
-                "button:visible:has-text('Continuar'), button:visible:has-text('Avançar'), button:visible:has-text('Comprar'), button:visible:has-text('Seguinte'), button:visible:has-text('Reservar')"
-            ).first
-            if continue_btn.count() > 0:
-                print(f"[AVANÇAR] A clicar em '{continue_btn.inner_text().strip()}'...")
-                continue_btn.click()
-                page.wait_for_timeout(3000)
-
-            print(f"[DEBUG URL PASSAGEIROS] URL atual: {page.url}")
-
-            body_text = page.locator("body").inner_text()
-            if "Não foi possível iniciar o processo de compra" in body_text:
-                return False, "Mensagem detetada: 'Não foi possível iniciar o processo de compra'.", None
-
-            # 3. Preencher dados do passageiro e Passe Ferroviário Verde
-
-
-            visible_inputs = page.locator("input:visible, select:visible")
-
-            if visible_inputs.count() == 0:
+            origin_ok = fill_station_input(page, origin_input, origin)
+            destination_ok = fill_station_input(page, destination_input, destination)
+            if not (origin_ok and destination_ok):
                 return (
                     False,
-                    "A página de dados do passageiro não foi apresentada "
-                    f"após a seleção da ida. URL atual: {page.url}",
-                    None
+                    f"Não foi possível selecionar as estações (origem={origin_ok}, destino={destination_ok}).",
+                    None,
                 )
 
-            print(
-                f"[DEBUG PASSAGEIROS] "
-                f"Formulário detetado com {visible_inputs.count()} campos."
+            date_input = first_existing(
+                page,
+                [
+                    "input[placeholder*='Data' i]",
+                    "input[aria-label*='Data' i]",
+                    "input[name*='data' i]",
+                    "input[placeholder*='dd/mm' i]",
+                    "input[name*='date' i]",
+                ],
+            )
+            if date_input is None and visible_text_inputs.count() >= 3:
+                date_input = visible_text_inputs.nth(2)
+
+            if date_input is None or not locator_visible(date_input, 2500):
+                return False, "Campo da data da viagem não encontrado.", None
+
+            date_input.click()
+            date_input.fill(cp_date_str)
+            date_input.press("Tab")
+            print(f"[FORM] Data preenchida: {cp_date_str}")
+
+            # Esperar pela abertura oficial, se a execução começou antes.
+            if wait_until_dt is not None:
+                now = datetime.now(LISBON_TZ)
+                seconds_to_wait = (wait_until_dt - now).total_seconds()
+                if 0 < seconds_to_wait <= 900:
+                    print(
+                        f"[SYNC] A aguardar {seconds_to_wait:.1f}s até "
+                        f"{wait_until_dt.strftime('%H:%M:%S')} Europe/Lisbon."
+                    )
+                    time.sleep(seconds_to_wait)
+
+            search_button = first_existing(
+                page,
+                [
+                    "button.search-button",
+                    "button:has-text('Pesquisar')",
+                    "button:has-text('Procurar')",
+                ],
+            )
+            if search_button is None or not locator_visible(search_button, 4000):
+                return False, "Botão de pesquisa não encontrado.", None
+            if not search_button.is_enabled():
+                return False, "Botão de pesquisa está desativado.", None
+
+            search_button.click(timeout=8000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=15000)
+            except PlaywrightTimeoutError:
+                pass
+            page.wait_for_timeout(1500)
+            print(f"[DEBUG URL PESQUISA] {page.url}")
+
+            # -----------------------------------------------------------------
+            # B. Escolher o Intercidades exato
+            # -----------------------------------------------------------------
+            train_card = find_specific_train_card(page, trip_time)
+            if train_card is None:
+                return False, f"Comboio Intercidades das {trip_time} não encontrado.", None
+
+            # Tentar subir mais dois níveis se o cartão encontrado não incluir
+            # o botão de seleção.
+            for _ in range(2):
+                try:
+                    if train_card.get_by_text(re.compile("Selecionar ida", re.IGNORECASE)).count() > 0:
+                        break
+                    parent = train_card.locator("xpath=../.").first
+                    if parent.count() == 0 or len(parent.inner_text()) > 2200:
+                        break
+                    train_card = parent
+                except Exception:
+                    break
+
+            card_text = " ".join(train_card.inner_text().split())
+            print(f"[DEBUG COMBOIO] {card_text[:1200]}")
+            if not re.search(r"Intercidades|\bIC\b", card_text, re.IGNORECASE):
+                return False, "O cartão localizado não foi identificado como Intercidades.", None
+            if trip_time not in card_text:
+                return False, "A hora do cartão localizado não corresponde à hora pedida.", None
+
+            select_outbound = train_card.get_by_text(
+                re.compile(r"Selecionar\s+ida", re.IGNORECASE)
+            ).last
+            if select_outbound.count() == 0 or not locator_visible(select_outbound, 4000):
+                return False, "Botão 'Selecionar ida' não encontrado no comboio pretendido.", None
+
+            print("[IDA] A selecionar o comboio pretendido.")
+            select_outbound.click(timeout=10000)
+
+            try:
+                page.get_by_text("Remover seleção", exact=True).last.wait_for(
+                    state="visible",
+                    timeout=12000,
+                )
+            except PlaywrightTimeoutError:
+                return False, "A CP não confirmou a seleção do comboio.", None
+
+            print("[IDA] Seleção confirmada.")
+            page.wait_for_timeout(800)
+
+            if not dismiss_blocking_modal(page):
+                return False, "Existe um diálogo que impede a continuação segura.", None
+
+            # -----------------------------------------------------------------
+            # C. Abrir o processo de compra
+            # -----------------------------------------------------------------
+            buy_button = find_visible_button(page, ["Comprar"])
+            if buy_button is None:
+                # Alguns elementos do portal podem não expor role=button.
+                buy_button = page.get_by_text("Comprar", exact=True).last
+                if not locator_visible(buy_button, 5000):
+                    return False, "Botão 'Comprar' não encontrado.", None
+
+            buy_button.scroll_into_view_if_needed()
+            print("[COMPRA] A abrir o processo de compra.")
+            buy_button.click(timeout=10000)
+
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=12000)
+            except PlaywrightTimeoutError:
+                pass
+            page.wait_for_timeout(1800)
+
+            body_text = page.locator("body").inner_text(timeout=7000)
+            if "Não foi possível iniciar o processo de compra" in body_text:
+                return False, "A CP indicou que não foi possível iniciar o processo de compra.", None
+
+            # -----------------------------------------------------------------
+            # D. Dados do passageiro e Passe Ferroviário Verde
+            # -----------------------------------------------------------------
+            name_selectors = [
+                "input[name*='nome' i]",
+                "input[placeholder*='Nome' i]",
+                "input[id*='nome' i]",
+            ]
+            id_selectors = [
+                "input[name*='documento' i]",
+                "input[name*='identificacao' i]",
+                "input[placeholder*='Identificação' i]",
+                "input[placeholder*='Cartão' i]",
+                "input[id*='documento' i]",
+                "input[id*='identificacao' i]",
+            ]
+            email_selectors = [
+                "input[type='email']",
+                "input[name*='email' i]",
+                "input[placeholder*='Email' i]",
+            ]
+
+            # Esperar pelo formulário, em vez de clicar antecipadamente num
+            # possível botão Continuar antes de preencher os dados.
+            name_locator = first_existing(page, name_selectors)
+            if name_locator is None or not locator_visible(name_locator, 10000):
+                return (
+                    False,
+                    f"Formulário do passageiro não encontrado. URL: {page.url}. "
+                    f"Ecrã: {' '.join(body_text.split())[-900:]}",
+                    None,
+                )
+
+            print("[PASSAGEIROS] Formulário detetado.")
+            if not fill_required_field(page, name_selectors, passenger_name, "Nome"):
+                return False, "Não foi possível preencher o nome do passageiro.", None
+            if not fill_required_field(page, id_selectors, passenger_id, "Identificação"):
+                return False, "Não foi possível preencher o documento de identificação.", None
+            if not fill_required_field(page, email_selectors, passenger_email, "E-mail"):
+                return False, "Não foi possível preencher o e-mail do passageiro.", None
+
+            if not select_green_pass(page):
+                return False, "Não foi possível selecionar o Passe Ferroviário Verde.", None
+
+            extra_info = first_existing(
+                page,
+                [
+                    "input[name*='adicional' i]",
+                    "input[placeholder*='Informação adicional' i]",
+                    "input[name*='cartao' i]",
+                    "input[name*='passe' i]",
+                    "input[id*='cartao' i]",
+                    "input[id*='passe' i]",
+                ],
+            )
+            if extra_info is None or not locator_visible(extra_info, 3000):
+                return False, "Campo para o código/número do Passe Ferroviário Verde não encontrado.", None
+            try:
+                extra_info.fill(pass_code, timeout=5000)
+            except Exception as exc:
+                return False, f"Não foi possível preencher o código do passe: {exc}", None
+
+            continue_button = find_visible_button(page, ["Continuar", "Avançar", "Seguinte"])
+            if continue_button is None:
+                return False, "Botão para validar os dados do passageiro não encontrado.", None
+
+            continue_button.click(timeout=8000)
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=10000)
+            except PlaywrightTimeoutError:
+                pass
+            page.wait_for_timeout(1500)
+
+            body_text = page.locator("body").inner_text(timeout=7000)
+            if "Não foi possível iniciar o processo de compra" in body_text:
+                return False, "A CP rejeitou a validação do passe ou não existem lugares elegíveis.", None
+
+            # -----------------------------------------------------------------
+            # E. Carruagem/lugar e resumo
+            # -----------------------------------------------------------------
+            seat_summary = select_coach_and_seat(page)
+            next_button = find_visible_button(page, ["Continuar", "Avançar", "Confirmar", "Seguinte"])
+            if next_button is not None:
+                try:
+                    next_button.click(timeout=7000)
+                    try:
+                        page.wait_for_load_state("domcontentloaded", timeout=8000)
+                    except PlaywrightTimeoutError:
+                        pass
+                    page.wait_for_timeout(1200)
+                except Exception as exc:
+                    print(f"[AVISO LUGAR] Não foi possível avançar após a seleção de lugar: {exc}")
+
+            # -----------------------------------------------------------------
+            # F. Circuit breaker: só prosseguir se o total explícito for 0,00 €
+            # -----------------------------------------------------------------
+            if not verify_zero_euro_total(page):
+                return False, "ABORTADO POR SEGURANÇA: total de 0,00 € não confirmado.", None
+
+            # Termos podem ser apresentados como checkbox. Se existir, tem de
+            # ficar selecionado. A ausência é registada, mas não se seleciona
+            # qualquer checkbox de publicidade por engano.
+            terms_found = accept_terms_if_present(page)
+            if not terms_found:
+                # Alguns fluxos da CP não mostram checkbox nesta etapa; só
+                # prosseguir se não houver checkbox visível por selecionar.
+                visible_checkboxes = page.locator("input[type='checkbox']:visible")
+                if visible_checkboxes.count() > 0:
+                    return False, "Existe um checkbox visível de termos que não foi possível confirmar.", None
+
+            # Revalidar o total imediatamente antes de submeter.
+            if not verify_zero_euro_total(page):
+                return False, "ABORTADO POR SEGURANÇA: o total deixou de ser 0,00 €.", None
+
+            final_button = find_visible_button(
+                page,
+                ["Concluir", "Finalizar", "Confirmar compra", "Emitir", "Concluir compra"],
+            )
+            if final_button is None:
+                return False, "Botão final de emissão/conclusão não encontrado.", None
+
+            print("[EMISSÃO] A submeter a compra com total confirmado de 0,00 €.")
+            # A partir daqui, qualquer falha é tratada como estado incerto para
+            # impedir uma segunda tentativa automática que possa duplicar a compra.
+            final_submit_attempted = True
+            final_button.click(timeout=10000)
+
+            try:
+                page.wait_for_load_state("networkidle", timeout=20000)
+            except PlaywrightTimeoutError:
+                pass
+            page.wait_for_timeout(1800)
+
+            final_body = page.locator("body").inner_text(timeout=8000)
+            final_body_normalized = " ".join(final_body.split())
+            print(f"[DEBUG CONFIRMAÇÃO] {final_body_normalized[-1600:]}")
+
+            success_pattern = re.compile(
+                r"compra\s+(?:foi\s+)?(?:efetuada|conclu[ií]da|confirmada)\s+com\s+sucesso|"
+                r"bilhete\s+(?:foi\s+)?emitido|"
+                r"reserva\s+confirmada|"
+                r"pedido\s+confirmado|"
+                r"compra\s+confirmada|"
+                r"obrigado.{0,80}(?:compra|reserva|bilhete)",
+                re.IGNORECASE,
             )
 
-            visible_inputs = page.locator("input:visible, select:visible")
-            print(f"[DEBUG PASSAGEIROS] Inputs/Selects visíveis: {visible_inputs.count()}")
-
-            name_field = page.locator("input[name*='nome' i], input[placeholder*='Nome' i]").first
-            if name_field.is_visible(timeout=4000):
-                name_field.fill(passenger_name)
-
-            id_field = page.locator("input[name*='documento' i], input[name*='identificacao' i], input[placeholder*='Identificação' i], input[placeholder*='Cartão' i]").first
-            if id_field.is_visible():
-                id_field.fill(passenger_id)
-
-            email_field = page.locator("input[type='email'], input[name*='email' i]").first
-            if email_field.is_visible():
-                email_field.fill(passenger_email)
-
-            discount_select = page.locator("select[name*='desconto' i], select[id*='desconto' i]").first
-            if discount_select.is_visible():
-                discount_select.select_option(label="Passe Ferroviário Verde")
-            else:
-                discount_trigger = page.locator("button:has-text('Desconto'), button:has-text('Sem desconto'), [aria-label*='Desconto' i], label:has-text('Desconto')").first
-                if discount_trigger.is_visible(timeout=5000):
-                    discount_trigger.click()
-                    page.wait_for_timeout(800)
-                    page.locator("text=Passe Ferroviário Verde").first.click()
-                else:
-                    print(f"[DEBUG TEXTO ECRÃ] {body_text[:400].replace(chr(10), ' | ')}")
-                    return False, "Campo 'Desconto' não encontrado no ecrã atual.", None
-
-            page.wait_for_timeout(1000)
-
-            extra_info_field = page.locator(
-                "input[name*='adicional' i], input[placeholder*='Informação adicional' i], input[name*='cartao' i], input[name*='passe' i]"
-            ).first
-            extra_info_field.fill(pass_code)
-
-            page.locator("button:has-text('Continuar'), button:has-text('Avançar'), button:has-text('Seguinte')").first.click()
-            page.wait_for_timeout(2500)
-
-            if "Não foi possível iniciar o processo de compra" in page.locator("body").inner_text():
-                return False, "Erro ao validar Passe Ferroviário Verde / sem lugares disponíveis para o passe.", None
-
-            # 4. Escolha de Carruagem (24/23) e Lugar (68/63)
-            seat_summary = select_coach_and_seat(page)
-            next_after_seat = page.locator("button:has-text('Continuar'), button:has-text('Avançar'), button:has-text('Confirmar'), button:has-text('Seguinte')").first
-            if next_after_seat.is_visible():
-                next_after_seat.click()
-                page.wait_for_timeout(2000)
-
-            # 5. Circuit Breaker: Validar Total == 0,00 €
-            if not verify_zero_euro_total(page):
-                return False, "ABORTADO POR SEGURANÇA: O total apresentado não é 0,00 €.", None
-
-            # 6. Aceitar Termos e Concluir Compra
-            terms_checkbox = page.locator("input[type='checkbox']").first
-            if terms_checkbox.is_visible() and not terms_checkbox.is_checked():
-                terms_checkbox.check()
-
-            final_submit = page.locator("button:has-text('Concluir'), button:has-text('Finalizar'), button:has-text('Confirmar compra'), button:has-text('Emitir')").first
-            final_submit.click()
-            page.wait_for_load_state("networkidle", timeout=25000)
-
-            # 7. Descarregar PDF do bilhete
-            pdf_bytes = None
-            download_btn = page.locator("a:has-text('PDF'), button:has-text('Descarregar'), a:has-text('Bilhete')").first
-            if download_btn.is_visible(timeout=5000):
-                try:
-                    with page.expect_download(timeout=10000) as download_info:
-                        download_btn.click()
-                    download = download_info.value
-                    pdf_path = download.path()
-                    if pdf_path:
-                        with open(pdf_path, "rb") as f:
-                            pdf_bytes = f.read()
-                except Exception as dl_err:
-                    print(f"[AVISO PDF] Bilhete emitido, mas não foi possível descarregar o anexo PDF: {dl_err}")
+            pdf_bytes = download_ticket_pdf(page)
+            if not success_pattern.search(final_body_normalized) and not pdf_bytes:
+                return (
+                    False,
+                    "[REVIEW_REQUIRED] A submissão final foi tentada, mas a página não confirmou a emissão. "
+                    "Verificar manualmente a área de reservas/e-mail antes de permitir nova tentativa.",
+                    None,
+                )
 
             return True, seat_summary, pdf_bytes
 
-        except PlaywrightTimeoutError as te:
-            return False, f"Timeout durante a navegação: {te}", None
+        except PlaywrightTimeoutError as exc:
+            if final_submit_attempted:
+                return (
+                    False,
+                    f"[REVIEW_REQUIRED] Timeout depois de tentar submeter a compra: {exc}. "
+                    "Verificar manualmente antes de repetir.",
+                    None,
+                )
+            return False, f"Timeout durante a navegação/interação: {exc}", None
         except Exception as exc:
-            return False, f"Erro inesperado na tentativa: {exc}", None
+            if final_submit_attempted:
+                return (
+                    False,
+                    f"[REVIEW_REQUIRED] Erro depois de tentar submeter a compra: {type(exc).__name__}: {exc}. "
+                    "Verificar manualmente antes de repetir.",
+                    None,
+                )
+            return False, f"Erro inesperado durante a tentativa: {type(exc).__name__}: {exc}", None
         finally:
-            context.close()
-            browser.close()
+            if context is not None:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+            if browser is not None:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
 
 
-# ==============================================================================
-# 3. ORQUESTRADOR PRINCIPAL (MÁQUINA DE ESTADOS)
-# ==============================================================================
+# =============================================================================
+# 4. ORQUESTRADOR / MÁQUINA DE ESTADOS
+# =============================================================================
 
 def main() -> None:
-    if os.getenv("RESET_STATUS", "false").lower() == "true":
+    if os.getenv("RESET_STATUS", "false").strip().lower() == "true":
         update_github_variable("BOOKING_STATUS", "PENDING")
         status = "PENDING"
     else:
         status = os.getenv("BOOKING_STATUS", "PENDING").strip().upper()
 
     if status != "PENDING":
-        print(f"[STOP] Estado atual é '{status}'. Nenhuma ação necessária.")
+        print(f"[STOP] Estado atual: {status}. Nenhuma ação executada.")
         return
 
     origin = os.getenv("TRIP_ORIGIN", "").strip()
@@ -572,34 +1009,55 @@ def main() -> None:
     trip_date = os.getenv("TRIP_DATE", "").strip()
     trip_time = os.getenv("TRIP_TIME", "").strip()
 
-    if not all([origin, destination, trip_date, trip_time]):
-        print("[ERRO CONFIG] Faltam dados obrigatórios da viagem (TRIP_ORIGIN, TRIP_DESTINATION, TRIP_DATE, TRIP_TIME).")
+    if not all((origin, destination, trip_date, trip_time)):
+        print(
+            "[ERRO CONFIG] Faltam variáveis obrigatórias: "
+            "TRIP_ORIGIN, TRIP_DESTINATION, TRIP_DATE e TRIP_TIME."
+        )
         return
 
-    departure_dt = datetime.strptime(f"{trip_date} {trip_time}", "%Y-%m-%d %H:%M").replace(tzinfo=LISBON_TZ)
+    try:
+        departure_naive = datetime.strptime(
+            f"{trip_date} {trip_time}",
+            "%Y-%m-%d %H:%M",
+        )
+        departure_dt = departure_naive.replace(tzinfo=LISBON_TZ)
+    except ValueError:
+        print("[ERRO CONFIG] TRIP_DATE/TRIP_TIME devem usar AAAA-MM-DD e HH:MM.")
+        return
+
     now = datetime.now(LISBON_TZ)
 
+    # Início 10 minutos antes para permitir abrir o portal; tentativa exata na
+    # abertura prevista (24 horas antes da partida); manter tentativas durante
+    # 3 horas após a abertura, tal como definido pela janela abaixo.
     window_pre_start = departure_dt - timedelta(hours=24, minutes=10)
     window_open_exact = departure_dt - timedelta(hours=24) + timedelta(seconds=1)
     window_end = departure_dt - timedelta(hours=21)
 
-    print(f"[TEMPO] Agora: {now.strftime('%Y-%m-%d %H:%M:%S')} | Partida: {departure_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(
+        f"[TEMPO] Agora: {now.strftime('%Y-%m-%d %H:%M:%S %Z')} | "
+        f"Partida: {departure_dt.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+    )
 
     if now < window_pre_start:
-        print(f"[AGUARDAR] Fora da janela ativa. O agente iniciará às {window_pre_start.strftime('%Y-%m-%d %H:%M')}.")
+        print(
+            f"[AGUARDAR] Fora da janela ativa. Próxima execução útil a partir de "
+            f"{window_pre_start.strftime('%Y-%m-%d %H:%M:%S %Z')} Europe/Lisbon."
+        )
         return
 
     if now > window_end:
-        print("[EXPIRADO] Passaram 2 horas desde a abertura sem conseguir emitir bilhete.")
+        print("[EXPIRADO] Terminou a janela de 3 horas após a abertura sem emissão confirmada.")
         update_github_variable("BOOKING_STATUS", "FAILED_EXPIRED")
         send_email(
-            subject="Não consegui comprar bilhete",
+            subject="Não foi possível emitir o bilhete CP",
             body=(
-                f"Não consegui comprar bilhete.\n\n"
-                f"Detalhes da viagem procurada:\n"
-                f"- Trajeto: {origin} -> {destination}\n"
-                f"- Data/Hora: {trip_date} às {trip_time} (Intercidades, 2ª Classe)\n"
-                f"- Janela de tentativas concluída sem vagas disponíveis."
+                "Não foi possível emitir o bilhete dentro da janela de tentativas.\n\n"
+                f"Trajeto: {origin} -> {destination}\n"
+                f"Data: {trip_date} às {trip_time}\n"
+                "Serviço pretendido: Intercidades, 2.ª classe\n"
+                "Estado: FAILED_EXPIRED\n"
             ),
         )
         return
@@ -614,22 +1072,42 @@ def main() -> None:
     )
 
     if success:
-        print(f"[SUCESSO] Bilhete emitido! {details}")
-        update_github_variable("BOOKING_STATUS", "BOUGHT")
+        print(f"[SUCESSO] Emissão confirmada. {details}")
+        if update_github_variable("BOOKING_STATUS", "BOUGHT"):
+            print("[ESTADO] BOOKING_STATUS definido como BOUGHT.")
+        else:
+            print("[AVISO] Bilhete emitido, mas não foi possível atualizar BOOKING_STATUS no GitHub.")
+
         send_email(
-            subject="Bilhete OK",
+            subject="Bilhete CP emitido",
             body=(
-                f"Bilhete OK\n\n"
-                f"Detalhes da reserva emitida (0,00 € - Passe Ferroviário Verde):\n"
-                f"- Trajeto: {origin} -> {destination}\n"
-                f"- Data/Hora: {trip_date} às {trip_time}\n"
-                f"- Alocação: {details}\n"
+                "Bilhete CP emitido com sucesso.\n\n"
+                "Detalhes: total validado de 0,00 € (Passe Ferroviário Verde).\n"
+                f"Trajeto: {origin} -> {destination}\n"
+                f"Data/hora: {trip_date} às {trip_time}\n"
+                f"Alocação: {details}\n"
             ),
             pdf_bytes=pdf_bytes,
             pdf_filename=f"Bilhete_CP_{trip_date}_{trip_time.replace(':', 'h')}.pdf",
         )
     else:
-        print(f"[TENTATIVA SEM SUCESSO] {details}. Nova tentativa no próximo ciclo de 5 minutos.")
+        if details.startswith("[REVIEW_REQUIRED]"):
+            print(f"[REVISÃO MANUAL] {details}")
+            update_github_variable("BOOKING_STATUS", "REVIEW_REQUIRED")
+            send_email(
+                subject="Verificação manual necessária — compra CP",
+                body=(
+                    "O processo chegou à submissão final, mas não foi possível confirmar o resultado. "
+                    "Para evitar uma eventual compra duplicada, as tentativas automáticas foram suspensas.\n\n"
+                    f"Trajeto: {origin} -> {destination}\n"
+                    f"Data/hora: {trip_date} às {trip_time}\n\n"
+                    f"Detalhe: {details}\n\n"
+                    "Verifique a área de reservas da CP e o e-mail antes de repor BOOKING_STATUS para PENDING."
+                ),
+            )
+        else:
+            # Antes da submissão final, uma falha é segura para nova tentativa.
+            print(f"[TENTATIVA SEM SUCESSO] {details}. Será tentado novamente no próximo ciclo.")
 
 
 if __name__ == "__main__":
