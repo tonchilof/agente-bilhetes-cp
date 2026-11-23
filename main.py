@@ -168,38 +168,55 @@ def verify_zero_euro_total(page) -> bool:
 
 def find_specific_train_card(page, trip_time: str):
     """
-    Encontra o cartão individual do comboio Intercidades das `trip_time`.
+    Aguarda o carregamento dinâmico dos comboios e encontra o cartão do Intercidades das `trip_time`.
     """
+    # 1. Espera explicitamente que a hora pretendida apareça renderizada na página (até 15s)
+    try:
+        page.locator(f"text={trip_time}").first.wait_for(state="visible", timeout=15000)
+        page.wait_for_timeout(1500)
+    except Exception:
+        print(f"[DEBUG] A hora '{trip_time}' não ficou visível na página após 15s.")
+        body_txt = page.locator("body").inner_text()
+        print(f"[DEBUG HORAS VISÍVEIS] {re.findall(r'\b\d{2}:\d{2}\b', body_txt)[:20]}")
+        return None
+
+    # 2. Localiza todos os elementos que contêm a hora exata (ex: 19:45)
     candidates = page.locator("div, li, tr, article, section").filter(
         has_text=re.compile(rf"\b{re.escape(trip_time)}\b")
     )
 
     best_card = None
     smallest_len = 999999
-
     count = candidates.count()
+    print(f"[DEBUG] Elementos com '{trip_time}' encontrados: {count}")
+
     for i in range(count):
         el = candidates.nth(i)
         try:
             if not el.is_visible():
                 continue
             txt = el.inner_text()
-            if "Ordenar por" in txt or "Filtros" in txt:
+            # Ignora apenas o contentor gigante da página toda (mais de 3500 caracteres)
+            if len(txt) > 3500:
                 continue
-            if re.search(r"Intercidades|\bIC\b", txt, re.IGNORECASE) and 15 <= len(txt) < 3000:
-                if len(txt) < smallest_len:
+            # Verifica se o bloco tem o serviço IC / Intercidades e pelo menos um botão/preço
+            if re.search(r"Intercidades|\bIC\b", txt, re.IGNORECASE) and 20 <= len(txt) < smallest_len:
+                # Garante que tem pelo menos 1 elemento clicável lá dentro (botão, link ou preço)
+                if el.locator("button, a, [role='button']").count() > 0:
                     smallest_len = len(txt)
                     best_card = el
         except Exception:
             continue
 
+    # 3. Diagnóstico detalhado caso a estrutura do cartão seja diferente
     if not best_card:
         for i in range(count):
             el = candidates.nth(i)
             try:
                 txt = el.inner_text()
-                if "Ordenar por" not in txt and len(txt) < 1500:
-                    print(f"[DEBUG BLOCO {trip_time}] {txt.replace(chr(10), ' | ')[:250]}")
+                if 30 <= len(txt) <= 1200:
+                    print(f"[DEBUG ESTRUTURA {trip_time}] Texto: {txt.replace(chr(10), ' | ')}")
+                    print(f"[DEBUG HTML {trip_time}] {el.inner_html()[:400]}")
                     break
             except Exception:
                 continue
