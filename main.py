@@ -294,52 +294,90 @@ def attempt_ticket_purchase(
                 print(f"[DEBUG COMBOIO EXPANDIDO] {card_text.replace(chr(10), ' | ')}")
 
           
-# Selecionar efetivamente a ida, em vez de abrir apenas os detalhes.
-select_ida = train_card.locator(
-    "button:visible, a:visible, [role='button']:visible"
-).filter(
-    has_text=re.compile(r"Selecionar ida", re.IGNORECASE)
-).first
 
-# Alternativa caso o botão não esteja dentro do contentor identificado.
-if select_ida.count() == 0:
-    select_ida = page.get_by_text(
-        "Selecionar ida",
-        exact=True
-    ).last
+            # 2. Localizar o cartão exato do comboio Intercidades
+            train_card = find_specific_train_card(page, trip_time)
 
-if select_ida.count() == 0:
-    print("[ERRO] Botão 'Selecionar ida' não encontrado.")
-    return False, "Botão 'Selecionar ida' não encontrado no cartão do comboio.", None
+            if not train_card:
+                return False, (
+                    f"Cartão individual do Intercidades "
+                    f"das {trip_time} não encontrado."
+                ), None
 
-print("[CLIQUE CARTÃO] A selecionar efetivamente a ida.")
+            card_text = train_card.inner_text()
 
-select_ida.click()
-page.wait_for_timeout(2500)
+            # Expandir o contentor para incluir os botões da viagem
+            row_container = train_card.locator("xpath=../..").first
 
-print(f"[DEBUG URL APÓS SELEÇÃO] {page.url}")
+            if row_container.count() > 0:
+                if len(row_container.inner_text()) < 1500:
+                    train_card = row_container
+                    card_text = train_card.inner_text()
 
-# Verificar se a página avançou para uma etapa com formulário.
-visible_inputs = page.locator("input:visible, select:visible")
+            print(
+                f"[DEBUG COMBOIO EXPANDIDO] "
+                f"{card_text.replace(chr(10), ' | ')}"
+            )
 
-print(
-    f"[DEBUG APÓS SELEÇÃO] "
-    f"Inputs/Selects visíveis: {visible_inputs.count()}"
-)
+            # Procurar especificamente o botão Selecionar ida
+            select_ida = train_card.locator(
+                "button:visible, a:visible, [role='button']:visible"
+            ).filter(
+                has_text=re.compile(
+                    r"Selecionar ida",
+                    re.IGNORECASE
+                )
+            ).first
 
-body_text = page.locator("body").inner_text()
+            # Alternativa: procurar o texto na página inteira
+            if select_ida.count() == 0:
+                select_ida = page.get_by_text(
+                    "Selecionar ida",
+                    exact=True
+                ).last
 
-print(
-    f"[DEBUG TEXTO APÓS SELEÇÃO] "
-    f"{body_text[:1200].replace(chr(10), ' | ')}"
-)
+            if select_ida.count() == 0:
+                return False, (
+                    "Botão 'Selecionar ida' não encontrado."
+                ), None
 
-# Só avançar se existir efetivamente um formulário ou etapa seguinte.
-if visible_inputs.count() == 0:
-    print(
-        "[AVISO] A seleção da ida não apresentou campos de formulário. "
-        "É necessário verificar a etapa atual do site."
-    )
+            print(
+                "[CLIQUE CARTÃO] A selecionar efetivamente "
+                "o botão 'Selecionar ida'."
+            )
+
+            select_ida.click()
+            page.wait_for_timeout(2500)
+
+            print(f"[DEBUG URL APÓS SELEÇÃO] {page.url}")
+
+            # Verificar se avançou para o formulário
+            visible_inputs = page.locator(
+                "input:visible, select:visible"
+            )
+
+            print(
+                f"[DEBUG APÓS SELEÇÃO] "
+                f"Inputs/Selects visíveis: {visible_inputs.count()}"
+            )
+
+            body_text = page.locator("body").inner_text()
+
+            print(
+                f"[DEBUG TEXTO APÓS SELEÇÃO] "
+                f"{body_text[:1200].replace(chr(10), ' | ')}"
+            )
+
+            if visible_inputs.count() == 0:
+                return False, (
+                    "A seleção da ida não apresentou "
+                    "campos de formulário. "
+                    f"URL atual: {page.url}"
+                ), None
+
+            # 3. Preencher dados do passageiro
+            print("[PASSAGEIROS] Formulário detetado.")
+
 
             page.wait_for_timeout(1500)
 
