@@ -75,6 +75,93 @@ def send_email(subject: str, body: str, pdf_bytes: bytes | None = None, pdf_file
 # ==============================================================================
 
 def handle_cookies(page) -> None:
+    
+def dismiss_blocking_modal(page) -> bool:
+    """Deteta e tenta fechar um modal que bloqueia a página."""
+
+    modal = page.locator(
+        '[role="dialog"][aria-modal="true"]:visible, '
+        '.modal-overlay:visible'
+    ).last
+
+    if modal.count() == 0:
+        return True
+
+    try:
+        modal_text = modal.inner_text(timeout=3000)
+    except Exception:
+        modal_text = "Texto do modal indisponível"
+
+    print(f"[MODAL] Modal detetado: {modal_text[:1000]}")
+
+    buttons = modal.locator(
+        "button:visible, [role='button']:visible"
+    )
+
+    button_names = []
+    for i in range(buttons.count()):
+        try:
+            button_names.append(buttons.nth(i).inner_text().strip())
+        except Exception:
+            pass
+
+    print(f"[MODAL] Botões disponíveis: {button_names}")
+
+    # Procurar um botão explícito de fechar
+    close_button = modal.locator(
+        "button[aria-label*='fechar' i], "
+        "button[title*='fechar' i], "
+        "button[aria-label*='close' i], "
+        "button[title*='close' i], "
+        "button.close, "
+        "[data-bs-dismiss='modal'], "
+        "[data-dismiss='modal'], "
+        ".modal-close, "
+        ".close-modal"
+    ).first
+
+    if close_button.count() > 0:
+        try:
+            if close_button.is_visible():
+                close_button.click(timeout=3000)
+                modal.wait_for(state="hidden", timeout=4000)
+                print("[MODAL] Modal fechado com sucesso.")
+                return True
+        except Exception as e:
+            print(f"[MODAL] Falha ao clicar no botão fechar: {e}")
+
+    # Procurar botão com texto explicitamente indicativo de fechar
+    close_text = modal.get_by_role(
+        "button",
+        name=re.compile(r"^(fechar|close|dispensar)$", re.IGNORECASE)
+    ).first
+
+    if close_text.count() > 0:
+        try:
+            close_text.click(timeout=3000)
+            modal.wait_for(state="hidden", timeout=4000)
+            print("[MODAL] Modal fechado através do botão.")
+            return True
+        except Exception:
+            pass
+
+    # Última tentativa: tecla Escape
+    try:
+        page.keyboard.press("Escape")
+        modal.wait_for(state="hidden", timeout=3000)
+    except Exception:
+        pass
+
+    if modal.is_visible():
+        print(
+            "[ERRO MODAL] Modal continua ativo. "
+            "Não será efetuado nenhum clique por baixo do modal."
+        )
+        return False
+
+    print("[MODAL] Modal removido.")
+    return True
+
     try:
         cookie_btn = page.locator("#onetrust-reject-all-handler, #onetrust-accept-btn-handler").first
         if cookie_btn.is_visible(timeout=4000):
@@ -281,8 +368,8 @@ def attempt_ticket_purchase(
             print(f"[DEBUG URL] URL após pesquisa: {page.url}")
 
 
-            
             # 2. Selecionar comboio e avançar para a compra
+
             train_card = find_specific_train_card(page, trip_time)
 
             if not train_card:
@@ -301,7 +388,6 @@ def attempt_ticket_purchase(
                 f"{train_card.inner_text().replace(chr(10), ' | ')}"
             )
 
-            # Selecionar a ida
             select_ida = train_card.locator(
                 "button:visible, a:visible, [role='button']:visible"
             ).filter(
@@ -312,9 +398,8 @@ def attempt_ticket_purchase(
                 return False, "Botão Selecionar ida não encontrado.", None
 
             print("[IDA] A selecionar o comboio.")
-            select_ida.click()
+            select_ida.click(timeout=10000)
 
-            # Aguardar confirmação da seleção
             try:
                 page.get_by_text(
                     "Remover seleção",
@@ -330,18 +415,11 @@ def attempt_ticket_purchase(
 
             page.wait_for_timeout(1000)
 
-            # Utilizar o atalho de acessibilidade para chegar à compra
-            skip_link = page.get_by_text(
-                "Saltar para o botão de compra",
-                exact=True
-            ).first
-
-            try:
-                if skip_link.is_visible():
-                    skip_link.click()
-                    page.wait_for_timeout(500)
-            except Exception:
-                pass
+            # Fechar eventuais modais que bloqueiem a compra
+            if not dismiss_blocking_modal(page):
+                return False, (
+                    "Modal da CP impede a interação com o botão Comprar."
+                ), None
 
             # Procurar o botão Comprar
             buy_pattern = re.compile(
@@ -372,14 +450,25 @@ def attempt_ticket_purchase(
                     timeout=10000
                 )
             except PlaywrightTimeoutError:
+                return False, "Botão Comprar não encontrado.", None
+
+            # Confirmar novamente que não existe um modal por cima
+            if not dismiss_blocking_modal(page):
                 return False, (
-                    "Botão Comprar não encontrado após selecionar a ida. "
-                    f"URL: {page.url}"
+                    "Modal continua a bloquear o botão Comprar."
                 ), None
+
+            buy_button.scroll_into_view_if_needed()
 
             print("[COMPRA] A clicar no botão Comprar.")
 
-            buy_button.click()
+            try:
+                buy_button.click(timeout=8000)
+            except Exception as e:
+                return False, (
+                    f"Não foi possível clicar em Comprar: {e}"
+                ), None
+
             page.wait_for_timeout(3500)
 
             try:
@@ -390,11 +479,10 @@ def attempt_ticket_purchase(
             except PlaywrightTimeoutError:
                 pass
 
-            page.wait_for_timeout(2000)
+            page.wait_for_timeout(1500)
 
             print(f"[DEBUG URL COMPRA] {page.url}")
 
-            # Confirmar que avançou para a etapa seguinte
             body_text = page.locator("body").inner_text()
 
             print(
@@ -413,14 +501,15 @@ def attempt_ticket_purchase(
 
             if visible_inputs.count() == 0:
                 return False, (
-                    "Após clicar em Comprar, não foram apresentados "
-                    "campos de dados do passageiro. "
+                    "Formulário do passageiro não apresentado. "
                     f"URL: {page.url} | "
                     f"Ecrã: {body_text[-1500:]}"
                 ), None
 
             print("[PASSAGEIROS] Formulário detetado.")
 
+
+            
             # 3. Preencher dados do passageiro e Passe Ferroviário Verde
 
 
@@ -578,7 +667,7 @@ def main() -> None:
 
     window_pre_start = departure_dt - timedelta(hours=24, minutes=10)
     window_open_exact = departure_dt - timedelta(hours=24) + timedelta(seconds=1)
-    window_end = departure_dt - timedelta(hours=22)
+    window_end = departure_dt - timedelta(hours=21)
 
     print(f"[TEMPO] Agora: {now.strftime('%Y-%m-%d %H:%M:%S')} | Partida: {departure_dt.strftime('%Y-%m-%d %H:%M:%S')}")
 
