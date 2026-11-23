@@ -22,6 +22,40 @@ from playwright.sync_api import (
 LISBON_TZ = ZoneInfo("Europe/Lisbon")
 CP_URL = "https://cp.pt/pt/"
 GITHUB_API = "https://api.github.com"
+_GITHUB_VARIABLE_CACHE: dict[str, str] = {}
+
+
+def get_config_value(name: str) -> str:
+    """Lê primeiro o ambiente do workflow e, em falta, a GitHub Actions Variable."""
+    value = os.getenv(name, "").strip()
+    if value:
+        return value
+
+    if name in _GITHUB_VARIABLE_CACHE:
+        return _GITHUB_VARIABLE_CACHE[name]
+
+    token = os.getenv("GH_PAT", "").strip()
+    repo = os.getenv("GITHUB_REPOSITORY", "").strip()
+    if not token or not repo:
+        return ""
+
+    url = f"{GITHUB_API}/repos/{repo}/actions/variables/{name}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code == 200:
+            value = str(response.json().get("value", "")).strip()
+            _GITHUB_VARIABLE_CACHE[name] = value
+            return value
+        if response.status_code not in (403, 404):
+            print(f"[AVISO CONFIG] Não foi possível ler a GitHub Variable {name}: HTTP {response.status_code}.")
+    except requests.RequestException as exc:
+        print(f"[AVISO CONFIG] Falha ao ler a GitHub Variable {name}: {exc}")
+    return ""
 
 
 # =============================================================================
@@ -669,6 +703,82 @@ def set_checkbox_for_statement(page, pattern: re.Pattern[str], description: str)
     return False
 
 
+def continue_as_guest_if_prompted(page) -> tuple[bool, str]:
+    """Deteta a autenticação CP e escolhe explicitamente a opção de convidado."""
+    try:
+        body = " ".join(page.locator("body").inner_text(timeout=7000).split())
+    except Exception as exc:
+        return False, f"Não foi possível ler a página de autenticação da CP: {exc}"
+
+    guest_pattern = re.compile(r"Continuar\s+como\s+convidado", re.IGNORECASE)
+    auth_pattern = re.compile(
+        r"Antes\s+de\s+continuar|escolha\s+como\s+prosseguir|Fazer\s+login|myCP",
+        re.IGNORECASE,
+    )
+
+    guest_button = None
+    for role in ("button", "link"):
+        candidate = page.get_by_role(role, name=guest_pattern).last
+        try:
+            if candidate.count() > 0 and locator_visible(candidate, 700):
+                guest_button = candidate
+                break
+        except Exception:
+            pass
+
+    if guest_button is None:
+        candidate = page.get_by_text(guest_pattern, exact=False).last
+        try:
+            if candidate.count() > 0 and locator_visible(candidate, 700):
+                guest_button = candidate
+        except Exception:
+            pass
+
+    if guest_button is None:
+        if auth_pattern.search(body):
+            return False, (
+                "A CP apresentou a página de autenticação, mas o controlo "
+                "'Continuar como convidado' não foi encontrado/ficou invisível. "
+                f"Ecrã: {body[-900:]}"
+            )
+        return True, "Não foi apresentado o passo de autenticação."
+
+    try:
+        print("[CONVIDADO] A selecionar 'Continuar como convidado'.")
+        guest_button.scroll_into_view_if_needed(timeout=5000)
+        guest_button.click(timeout=10000)
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=12000)
+        except PlaywrightTimeoutError:
+            pass
+        try:
+            page.wait_for_load_state("networkidle", timeout=8000)
+        except PlaywrightTimeoutError:
+            pass
+        page.wait_for_timeout(1200)
+    except Exception as exc:
+        return False, f"Não foi possível selecionar 'Continuar como convidado': {exc}"
+
+    try:
+        updated_body = " ".join(page.locator("body").inner_text(timeout=7000).split())
+    except Exception as exc:
+        return False, f"Não foi possível validar a continuação como convidado: {exc}"
+
+    still_on_auth = (
+        auth_pattern.search(updated_body) is not None
+        and guest_pattern.search(updated_body) is not None
+        and page.url.rstrip("/").endswith("/autenticacao")
+    )
+    if still_on_auth:
+        return False, (
+            "A opção 'Continuar como convidado' foi acionada, mas a CP manteve "
+            f"a página de autenticação. URL: {page.url}. Ecrã: {updated_body[-900:]}"
+        )
+
+    print(f"[CONVIDADO] Continuação como convidado iniciada. URL: {page.url}")
+    return True, "Continuação como convidado iniciada."
+
+
 def prepare_intermediate_purchase_step(page) -> tuple[bool, str]:
     """Confirma declarações da página-resumo e avança para os dados do passageiro."""
     body_text = page.locator("body").inner_text(timeout=7000)
@@ -704,7 +814,7 @@ def prepare_intermediate_purchase_step(page) -> tuple[bool, str]:
 
     if re.search(age_pattern, normalized):
         # A automação não deve declarar uma idade que não tenha sido configurada.
-        if os.getenv("PASSENGER_OVER_16", "").strip().lower() != "true":
+        if get_config_value("PASSENGER_OVER_16").strip().lower() != "true":
             return False, (
                 "A página exige a declaração 'Tenho mais de 16 anos'. "
                 "Defina PASSENGER_OVER_16=true apenas se a declaração for verdadeira."
@@ -738,13 +848,18 @@ def prepare_intermediate_purchase_step(page) -> tuple[bool, str]:
             f"detetou que não está acionável: {type(exc).__name__}: {exc}"
         )
 
-    print("[COMPRA] A avançar para o formulário do passageiro.")
+    print("[COMPRA] A avançar para a etapa seguinte.")
     advance_button.click(timeout=10000)
 
     try:
         page.wait_for_load_state("domcontentloaded", timeout=12000)
     except PlaywrightTimeoutError:
         pass
+    page.wait_for_timeout(1000)
+
+    guest_ok, guest_details = continue_as_guest_if_prompted(page)
+    if not guest_ok:
+        return False, guest_details
 
     name_selectors = [
         "input[name*='nome' i]",
@@ -862,20 +977,27 @@ def attempt_ticket_purchase(
     trip_time: str,
     wait_until_dt: datetime | None = None,
 ) -> tuple[bool, str, bytes | None]:
-    required_env = (
+    config_names = (
         "CP_PASS_CODE",
         "PASSENGER_NAME",
         "PASSENGER_ID_NUMBER",
         "PASSENGER_EMAIL",
     )
-    missing = [name for name in required_env if not os.getenv(name)]
+    config = {name: get_config_value(name) for name in config_names}
+    missing = [name for name, value in config.items() if not value]
     if missing:
-        return False, f"Variáveis de passageiro em falta: {', '.join(missing)}", None
+        return (
+            False,
+            "Dados do passageiro em falta no ambiente do workflow/GitHub Variables: "
+            + ", ".join(missing)
+            + ". Para GitHub Variables, GH_PAT tem de ter permissão Actions: Variables read.",
+            None,
+        )
 
-    pass_code = os.environ["CP_PASS_CODE"].strip()
-    passenger_name = os.environ["PASSENGER_NAME"].strip()
-    passenger_id = os.environ["PASSENGER_ID_NUMBER"].strip()
-    passenger_email = os.environ["PASSENGER_EMAIL"].strip()
+    pass_code = config["CP_PASS_CODE"]
+    passenger_name = config["PASSENGER_NAME"]
+    passenger_id = config["PASSENGER_ID_NUMBER"]
+    passenger_email = config["PASSENGER_EMAIL"]
 
     try:
         date_obj = datetime.strptime(trip_date, "%Y-%m-%d")
