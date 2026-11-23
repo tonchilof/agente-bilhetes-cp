@@ -61,6 +61,7 @@ jobs:
           TRIP_TIME: ${{ github.event.inputs.trip_time || vars.TRIP_TIME }}
           BOOKING_STATUS: ${{ vars.BOOKING_STATUS || 'PENDING' }}
           RESET_STATUS: ${{ github.event.inputs.reset_status || 'false' }}
+          PASSENGER_OVER_16: ${{ vars.PASSENGER_OVER_16 }}
 
           # Secrets Encriptados
           CP_PASS_CODE: ${{ secrets.CP_PASS_CODE }}
