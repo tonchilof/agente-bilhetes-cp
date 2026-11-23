@@ -678,8 +678,11 @@ def prepare_intermediate_purchase_step(page) -> tuple[bool, str]:
         if not set_checkbox_for_statement(page, age_pattern, "Mais de 16 anos"):
             return False, "Não foi possível confirmar a declaração de idade."
 
-    if not dismiss_blocking_modal(page):
-        return False, "Existe um diálogo a bloquear o botão 'Avançar para compra'."
+    # O resumo da CP pode estar dentro de um elemento com role="dialog".
+    # Esse contentor é a própria página de resumo (inclui declarações e o botão
+    # de avanço), não uma janela que deva ser fechada. Não chamar
+    # dismiss_blocking_modal() aqui: a função interpretaria o resumo como modal
+    # bloqueador por não existir um botão X/Fechar.
 
     # Voltar a localizar o botão após as caixas de seleção, pois a página pode
     # atualizar o estado do controlo dinamicamente.
@@ -689,8 +692,19 @@ def prepare_intermediate_purchase_step(page) -> tuple[bool, str]:
     if advance_button.count() == 0 or not locator_visible(advance_button, 2500):
         return False, "O botão 'Avançar para compra' desapareceu após confirmar as declarações."
 
+    print("[COMPRA] A validar o botão 'Avançar para compra'.")
+    try:
+        advance_button.scroll_into_view_if_needed(timeout=5000)
+        # trial=True verifica se o botão está realmente acionável e se algum
+        # overlay o interceta, sem executar a ação duas vezes.
+        advance_button.click(trial=True, timeout=6000)
+    except Exception as exc:
+        return False, (
+            "O botão 'Avançar para compra' foi encontrado, mas o Playwright "
+            f"detetou que não está acionável: {type(exc).__name__}: {exc}"
+        )
+
     print("[COMPRA] A avançar para o formulário do passageiro.")
-    advance_button.scroll_into_view_if_needed()
     advance_button.click(timeout=10000)
 
     try:
