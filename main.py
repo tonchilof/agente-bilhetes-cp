@@ -84,20 +84,28 @@ def handle_cookies(page) -> None:
         pass
 
 
-def fill_station_input(page, input_locator, station_name: str) -> None:
-    input_locator.click()
-    input_locator.fill("")
-    input_locator.press_sequentially(station_name, delay=80)
-    page.wait_for_timeout(1500)
-    suggestion = page.locator(
-        "[role='option'], .ui-autocomplete li, [class*='autocomplete'] li, [class*='suggestion'], [class*='dropdown'] li"
-    ).filter(has_text=re.compile(re.escape(station_name), re.IGNORECASE)).first
+def fill_station_input(page, input_locator, station_name: str) -> bool:
+    """Preenche a estação e garante que uma opção da lista suspensa é clicada (até 2 tentativas)."""
+    for attempt in range(2):
+        input_locator.click()
+        page.keyboard.press("Control+A")
+        page.keyboard.press("Backspace")
+        input_locator.press_sequentially(station_name, delay=90)
+        page.wait_for_timeout(1800)
 
-    if suggestion.is_visible(timeout=3000):
-        suggestion.click()
-        print(f"[FORM] Estação selecionada na lista: {station_name}")
-    else:
-        input_locator.press("Enter")
+        suggestion = page.locator(
+            "[role='option'], .ui-autocomplete li, [class*='autocomplete'] li, [class*='suggestion'], [class*='dropdown'] li"
+        ).filter(has_text=re.compile(re.escape(station_name), re.IGNORECASE)).first
+
+        if suggestion.is_visible(timeout=3500):
+            suggestion.click()
+            page.wait_for_timeout(500)
+            print(f"[FORM] Estação selecionada na lista: {station_name}")
+            return True
+
+        print(f"[AVISO FORM] Tentativa {attempt + 1}: lista não apareceu para '{station_name}', a tentar novamente...")
+
+    return False
 
 
 def select_coach_and_seat(page) -> str:
@@ -162,7 +170,6 @@ def find_specific_train_card(page, trip_time: str):
     """
     Encontra o cartão individual do comboio Intercidades das `trip_time`.
     """
-    # Procura blocos que tenham a hora exata (ex: 19:45)
     candidates = page.locator("div, li, tr, article, section").filter(
         has_text=re.compile(rf"\b{re.escape(trip_time)}\b")
     )
@@ -177,10 +184,8 @@ def find_specific_train_card(page, trip_time: str):
             if not el.is_visible():
                 continue
             txt = el.inner_text()
-            # Ignora o contentor da página inteira que tem os filtros globais
             if "Ordenar por" in txt or "Filtros" in txt:
                 continue
-            # Verifica se é um comboio Intercidades (IC) e tem dimensão de cartão individual
             if re.search(r"Intercidades|\bIC\b", txt, re.IGNORECASE) and 15 <= len(txt) < 3000:
                 if len(txt) < smallest_len:
                     smallest_len = len(txt)
@@ -188,7 +193,6 @@ def find_specific_train_card(page, trip_time: str):
         except Exception:
             continue
 
-    # Diagnóstico caso não encontre: imprime blocos que tenham a hora para vermos o formato
     if not best_card:
         for i in range(count):
             el = candidates.nth(i)
@@ -247,8 +251,11 @@ def attempt_ticket_purchase(
                 origin_input = text_inputs.nth(0)
                 dest_input = text_inputs.nth(1)
 
-            fill_station_input(page, origin_input, origin)
-            fill_station_input(page, dest_input, destination)
+            ok_origin = fill_station_input(page, origin_input, origin)
+            ok_dest = fill_station_input(page, dest_input, destination)
+
+            if not (ok_origin and ok_dest):
+                return False, f"Falha ao selecionar estações na lista (origem={ok_origin}, destino={ok_dest}).", None
 
             date_input = page.locator(
                 "input[placeholder*='Data' i], input[aria-label*='Data' i], input[name*='data' i], input[placeholder*='dd/mm' i]"
@@ -271,7 +278,10 @@ def attempt_ticket_purchase(
                     print(f"[SYNC] A aguardar {seconds_to_wait:.2f}s até à abertura exata ({wait_until_dt.strftime('%H:%M:%S')})...")
                     time.sleep(seconds_to_wait)
 
-            search_btn = page.locator("button:has-text('Pesquisar')").first
+            search_btn = page.locator("button.search-button, button:has-text('Pesquisar')").first
+            if search_btn.is_disabled():
+                return False, "Botão 'Pesquisar' permaneceu desativado após preenchimento.", None
+
             search_btn.click()
             page.wait_for_timeout(4000)
             try:
@@ -292,7 +302,6 @@ def attempt_ticket_purchase(
             if any(word in card_text for word in ["Lotado", "Esgotado", "Indisponível"]):
                 return False, f"Comboio das {trip_time} encontra-se lotado.", None
 
-            # Clica no botão de preço/seleção dentro do cartão do comboio
             action_btn = train_card.locator("button, a[role='button'], [class*='price'], [class*='select']").first
             if action_btn.count() > 0 and action_btn.is_visible():
                 action_btn.click()
@@ -300,7 +309,6 @@ def attempt_ticket_purchase(
                 train_card.click()
             page.wait_for_timeout(2500)
 
-            # Procura botão de avançar para a página de passageiros/descontos (ex: "Continuar", "Avançar", "Comprar")
             continue_btn = page.locator(
                 "button:has-text('Continuar'), button:has-text('Avançar'), button:has-text('Comprar'), button:has-text('Seguinte')"
             ).first
@@ -315,7 +323,6 @@ def attempt_ticket_purchase(
                 return False, "Mensagem detetada: 'Não foi possível iniciar o processo de compra'.", None
 
             # 3. Preencher dados do passageiro e Passe Ferroviário Verde
-            # Diagnóstico dos campos visíveis na etapa de passageiros
             visible_inputs = page.locator("input:visible, select:visible")
             print(f"[DEBUG PASSAGEIROS] Inputs/Selects visíveis: {visible_inputs.count()}")
 
@@ -331,12 +338,10 @@ def attempt_ticket_purchase(
             if email_field.is_visible():
                 email_field.fill(passenger_email)
 
-            # Selecionar Desconto: Passe Ferroviário Verde
             discount_select = page.locator("select[name*='desconto' i], select[id*='desconto' i]").first
             if discount_select.is_visible():
                 discount_select.select_option(label="Passe Ferroviário Verde")
             else:
-                # Procura dropdown ou botão com texto "Desconto" ou "Sem desconto" / "Normal"
                 discount_trigger = page.locator("button:has-text('Desconto'), button:has-text('Sem desconto'), [aria-label*='Desconto' i], label:has-text('Desconto')").first
                 if discount_trigger.is_visible(timeout=5000):
                     discount_trigger.click()
