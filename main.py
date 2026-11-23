@@ -293,14 +293,53 @@ def attempt_ticket_purchase(
                 card_text = train_card.inner_text()
                 print(f"[DEBUG COMBOIO EXPANDIDO] {card_text.replace(chr(10), ' | ')}")
 
-            # Tenta clicar num botão/preço visível dentro do cartão; se não houver, clica no próprio cartão
-            clickable_inside = train_card.locator("button:visible, a:visible, [role='button']:visible").first
-            if clickable_inside.count() > 0:
-                print(f"[CLIQUE CARTÃO] A clicar em elemento interativo dentro do cartão: {clickable_inside.inner_text().strip()}")
-                clickable_inside.click()
-            else:
-                print("[CLIQUE CARTÃO] A clicar diretamente no cartão do comboio.")
-                train_card.click()
+          
+# Selecionar efetivamente a ida, em vez de abrir apenas os detalhes.
+select_ida = train_card.locator(
+    "button:visible, a:visible, [role='button']:visible"
+).filter(
+    has_text=re.compile(r"Selecionar ida", re.IGNORECASE)
+).first
+
+# Alternativa caso o botão não esteja dentro do contentor identificado.
+if select_ida.count() == 0:
+    select_ida = page.get_by_text(
+        "Selecionar ida",
+        exact=True
+    ).last
+
+if select_ida.count() == 0:
+    print("[ERRO] Botão 'Selecionar ida' não encontrado.")
+    return False, "Botão 'Selecionar ida' não encontrado no cartão do comboio.", None
+
+print("[CLIQUE CARTÃO] A selecionar efetivamente a ida.")
+
+select_ida.click()
+page.wait_for_timeout(2500)
+
+print(f"[DEBUG URL APÓS SELEÇÃO] {page.url}")
+
+# Verificar se a página avançou para uma etapa com formulário.
+visible_inputs = page.locator("input:visible, select:visible")
+
+print(
+    f"[DEBUG APÓS SELEÇÃO] "
+    f"Inputs/Selects visíveis: {visible_inputs.count()}"
+)
+
+body_text = page.locator("body").inner_text()
+
+print(
+    f"[DEBUG TEXTO APÓS SELEÇÃO] "
+    f"{body_text[:1200].replace(chr(10), ' | ')}"
+)
+
+# Só avançar se existir efetivamente um formulário ou etapa seguinte.
+if visible_inputs.count() == 0:
+    print(
+        "[AVISO] A seleção da ida não apresentou campos de formulário. "
+        "É necessário verificar a etapa atual do site."
+    )
 
             page.wait_for_timeout(1500)
 
@@ -320,6 +359,23 @@ def attempt_ticket_purchase(
                 return False, "Mensagem detetada: 'Não foi possível iniciar o processo de compra'.", None
 
             # 3. Preencher dados do passageiro e Passe Ferroviário Verde
+
+
+            visible_inputs = page.locator("input:visible, select:visible")
+
+            if visible_inputs.count() == 0:
+                return (
+                    False,
+                    "A página de dados do passageiro não foi apresentada "
+                    f"após a seleção da ida. URL atual: {page.url}",
+                    None
+                )
+
+            print(
+                f"[DEBUG PASSAGEIROS] "
+                f"Formulário detetado com {visible_inputs.count()} campos."
+            )
+
             visible_inputs = page.locator("input:visible, select:visible")
             print(f"[DEBUG PASSAGEIROS] Inputs/Selects visíveis: {visible_inputs.count()}")
 
