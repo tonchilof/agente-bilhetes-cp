@@ -281,7 +281,8 @@ def attempt_ticket_purchase(
             print(f"[DEBUG URL] URL após pesquisa: {page.url}")
 
 
-            # 2. Localizar e selecionar o comboio pretendido
+            
+            # 2. Selecionar comboio e avançar para a compra
             train_card = find_specific_train_card(page, trip_time)
 
             if not train_card:
@@ -300,7 +301,7 @@ def attempt_ticket_purchase(
                 f"{train_card.inner_text().replace(chr(10), ' | ')}"
             )
 
-            # Localizar exclusivamente o botão da viagem pretendida
+            # Selecionar a ida
             select_ida = train_card.locator(
                 "button:visible, a:visible, [role='button']:visible"
             ).filter(
@@ -310,50 +311,99 @@ def attempt_ticket_purchase(
             if select_ida.count() == 0:
                 return False, "Botão Selecionar ida não encontrado.", None
 
-            print("[IDA] A clicar em Selecionar ida.")
+            print("[IDA] A selecionar o comboio.")
             select_ida.click()
-            page.wait_for_timeout(2000)
 
-            # Verificar se existe um botão para avançar
-            continue_pattern = re.compile(
-                r"Continuar|Avançar|Seguinte|Prosseguir",
+            # Aguardar confirmação da seleção
+            try:
+                page.get_by_text(
+                    "Remover seleção",
+                    exact=True
+                ).last.wait_for(state="visible", timeout=10000)
+
+                print("[IDA] Seleção confirmada.")
+
+            except PlaywrightTimeoutError:
+                return False, (
+                    "A CP não confirmou a seleção do comboio."
+                ), None
+
+            page.wait_for_timeout(1000)
+
+            # Utilizar o atalho de acessibilidade para chegar à compra
+            skip_link = page.get_by_text(
+                "Saltar para o botão de compra",
+                exact=True
+            ).first
+
+            try:
+                if skip_link.is_visible():
+                    skip_link.click()
+                    page.wait_for_timeout(500)
+            except Exception:
+                pass
+
+            # Procurar o botão Comprar
+            buy_pattern = re.compile(
+                r"^\s*Comprar\s*$",
                 re.IGNORECASE
             )
 
-            continue_btn = page.locator(
-                "button:visible, a:visible, [role='button']:visible"
-            ).filter(has_text=continue_pattern).last
+            buy_button = page.get_by_role(
+                "button",
+                name=buy_pattern
+            ).last
 
-            if continue_btn.count() > 0:
-                print(
-                    f"[AVANÇAR] Botão encontrado: "
-                    f"{continue_btn.inner_text().strip()}"
+            if buy_button.count() == 0:
+                buy_button = page.get_by_role(
+                    "link",
+                    name=buy_pattern
+                ).last
+
+            if buy_button.count() == 0:
+                buy_button = page.get_by_text(
+                    "Comprar",
+                    exact=True
+                ).last
+
+            try:
+                buy_button.wait_for(
+                    state="visible",
+                    timeout=10000
                 )
+            except PlaywrightTimeoutError:
+                return False, (
+                    "Botão Comprar não encontrado após selecionar a ida. "
+                    f"URL: {page.url}"
+                ), None
 
-                continue_btn.click()
-                page.wait_for_timeout(3500)
+            print("[COMPRA] A clicar no botão Comprar.")
 
-                try:
-                    page.wait_for_load_state(
-                        "domcontentloaded",
-                        timeout=10000
-                    )
-                except PlaywrightTimeoutError:
-                    pass
+            buy_button.click()
+            page.wait_for_timeout(3500)
 
-            else:
-                print(
-                    "[AVISO] Não foi encontrado botão de continuação "
-                    "após selecionar a ida."
+            try:
+                page.wait_for_load_state(
+                    "domcontentloaded",
+                    timeout=10000
                 )
+            except PlaywrightTimeoutError:
+                pass
 
-            # Verificar o estado real da página
-            print(f"[DEBUG URL ETAPA SEGUINTE] {page.url}")
+            page.wait_for_timeout(2000)
 
-            page.wait_for_timeout(1500)
+            print(f"[DEBUG URL COMPRA] {page.url}")
+
+            # Confirmar que avançou para a etapa seguinte
+            body_text = page.locator("body").inner_text()
+
+            print(
+                f"[DEBUG ECRÃ COMPRA] "
+                f"{body_text[:2000].replace(chr(10), ' | ')}"
+            )
 
             visible_inputs = page.locator(
-                "input:visible, select:visible"
+                "input:visible, select:visible, textarea:visible"
             )
 
             print(
@@ -361,32 +411,19 @@ def attempt_ticket_purchase(
                 f"Inputs/Selects visíveis: {visible_inputs.count()}"
             )
 
-            body_text = page.locator("body").inner_text()
-
             if visible_inputs.count() == 0:
-                visible_buttons = page.locator(
-                    "button:visible, [role='button']:visible"
-                )
-
-                button_texts = []
-                for i in range(visible_buttons.count()):
-                    try:
-                        txt = visible_buttons.nth(i).inner_text().strip()
-                        if txt:
-                            button_texts.append(txt)
-                    except Exception:
-                        pass
-
                 return False, (
-                    "Formulário do passageiro ainda não disponível. "
+                    "Após clicar em Comprar, não foram apresentados "
+                    "campos de dados do passageiro. "
                     f"URL: {page.url} | "
-                    f"Botões visíveis: {button_texts} | "
-                    f"Texto: {body_text[-1800:]}"
+                    f"Ecrã: {body_text[-1500:]}"
                 ), None
 
             print("[PASSAGEIROS] Formulário detetado.")
 
-            # 3. Preencher dados do passageiro
+            # 3. Preencher dados do passageiro e Passe Ferroviário Verde
+
+
             print("[PASSAGEIROS] Formulário detetado.")
 
 
