@@ -160,14 +160,11 @@ def verify_zero_euro_total(page) -> bool:
 
 def find_specific_train_card(page, trip_time: str):
     """
-    Encontra o cartão individual do comboio Intercidades das `trip_time`,
-    ignorando contentores gerais da página que tenham 'Ordenar por' ou 'Filtros'.
+    Encontra o cartão individual do comboio Intercidades das `trip_time`.
     """
-    # Procura elementos que contenham a hora exata e IC/Intercidades, mas NÃO o cabeçalho da página
-    candidates = page.locator("div, li, tr, article").filter(
+    # Procura blocos que tenham a hora exata (ex: 19:45)
+    candidates = page.locator("div, li, tr, article, section").filter(
         has_text=re.compile(rf"\b{re.escape(trip_time)}\b")
-    ).filter(
-        has_text=re.compile(r"Intercidades|\bIC\b", re.IGNORECASE)
     )
 
     best_card = None
@@ -180,15 +177,28 @@ def find_specific_train_card(page, trip_time: str):
             if not el.is_visible():
                 continue
             txt = el.inner_text()
-            # Ignora contentores gigantes da página inteira
-            if "Ordenar por" in txt or "Filtros" in txt or len(txt) > 600:
+            # Ignora o contentor da página inteira que tem os filtros globais
+            if "Ordenar por" in txt or "Filtros" in txt:
                 continue
-            # Escolhe o cartão mais compacto que engloba toda a linha do comboio (com botão/preço)
-            if 20 <= len(txt) < smallest_len:
-                smallest_len = len(txt)
-                best_card = el
+            # Verifica se é um comboio Intercidades (IC) e tem dimensão de cartão individual
+            if re.search(r"Intercidades|\bIC\b", txt, re.IGNORECASE) and 15 <= len(txt) < 3000:
+                if len(txt) < smallest_len:
+                    smallest_len = len(txt)
+                    best_card = el
         except Exception:
             continue
+
+    # Diagnóstico caso não encontre: imprime blocos que tenham a hora para vermos o formato
+    if not best_card:
+        for i in range(count):
+            el = candidates.nth(i)
+            try:
+                txt = el.inner_text()
+                if "Ordenar por" not in txt and len(txt) < 1500:
+                    print(f"[DEBUG BLOCO {trip_time}] {txt.replace(chr(10), ' | ')[:250]}")
+                    break
+            except Exception:
+                continue
 
     return best_card
 
