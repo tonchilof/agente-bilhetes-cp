@@ -271,15 +271,17 @@ def fill_station_input(page, input_locator: Locator, station_name: str) -> bool:
     return False
 
 
-def find_specific_train_card(page, trip_time: str) -> Locator | None:
-    """Localiza o cartão Intercidades, sem exigir que a hora seja texto exato.
+def find_specific_train_card(page, trip_time: str, timeout_seconds: int = 25) -> tuple[Locator, str] | None:
+    """Encontra o controlo 'Selecionar ida' pertencente ao IC da hora pedida.
 
-    O portal pode colocar a hora num span com espaços/texto adicional ou dentro
-    de um iframe. A procura exact=True falhava nesses casos apesar de a hora
-    estar visível no ecrã. São tentados vários motores de texto e todos os
-    frames; o cartão só é devolvido quando contém a hora e a identificação IC.
+    Não depende de localizar a hora como um nó de texto isolado: percorre primeiro
+    os controlos de seleção e lê os respetivos ancestrais. Isto é mais robusto
+    quando a CP altera spans, componentes web, estrutura do cartão ou Shadow DOM.
+    A pesquisa é repetida durante alguns segundos para acomodar resultados
+    carregados assincronamente.
     """
     time_pattern = re.compile(rf"(?<!\d){re.escape(trip_time)}(?!\d)")
+    select_pattern = re.compile(r"Selecionar\s+ida", re.IGNORECASE)
     contexts: list[tuple[str, Any]] = [("página principal", page)]
 
     try:
@@ -290,112 +292,144 @@ def find_specific_train_card(page, trip_time: str) -> Locator | None:
     except Exception:
         pass
 
-    fallback_card: Locator | None = None
-    fallback_source = ""
+    # Percorre elementos ancestrais diretamente no browser. A avaliação começa
+    # no próprio botão/link e não utiliza XPath (que não atravessa Shadow DOM).
+    ancestor_script = r"""(element, requestedTime) => {
+        const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
+        const escaped = requestedTime.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const timeRegex = new RegExp('(^|\\D)' + escaped + '(?!\\d)');
+        const serviceRegex = /intercidades|\bIC\b/i;
+        let current = element;
+        let best = null;
+        for (let level = 0; current && level < 14; level += 1, current = current.parentElement) {
+            const text = normalize(current.innerText || current.textContent || '');
+            if (text.length >= 20 && text.length <= 5000 && timeRegex.test(text) && serviceRegex.test(text)) {
+                if (best === null || text.length < best.text.length) {
+                    best = { text, level };
+                }
+            }
+        }
+        return best;
+    }"""
 
-    for context_name, context in contexts:
-        time_locators: list[Locator] = []
+    deadline = time.monotonic() + max(5, timeout_seconds)
+    announced_wait = False
+    last_diagnostics: list[str] = []
 
-        # Mantém o seletor de texto que funcionava na versão anterior e usa
-        # get_by_text em modo parcial como alternativa robusta.
-        try:
-            time_locators.append(context.locator(f"text='{trip_time}'"))
-        except Exception:
-            pass
-        try:
-            time_locators.append(context.get_by_text(trip_time, exact=False))
-        except Exception:
-            pass
-        try:
-            time_locators.append(context.get_by_text(time_pattern))
-        except Exception:
-            pass
+    while time.monotonic() < deadline:
+        last_diagnostics = []
 
-        seen_texts: set[str] = set()
-        for time_locator in time_locators:
+        for context_name, context in contexts:
+            # Primeiro procura os controlos reais. Os seletores CSS do Playwright
+            # atravessam open Shadow DOM e também abrangem botões e links.
             try:
-                node_count = min(time_locator.count(), 40)
+                controls = context.locator(
+                    "button:visible, a:visible, [role='button']:visible"
+                ).filter(has_text=select_pattern)
+                control_count = min(controls.count(), 80)
             except Exception:
-                continue
+                control_count = 0
+                controls = None
 
-            for node_index in range(node_count):
-                time_node = time_locator.nth(node_index)
-                try:
-                    if not time_node.is_visible(timeout=500):
-                        continue
-                    node_text = " ".join(time_node.inner_text(timeout=1000).split())
-                    # Evita processar repetidamente o mesmo resultado produzido
-                    # por motores de texto diferentes.
-                    dedupe_key = node_text[:160]
-                    if dedupe_key in seen_texts:
-                        continue
-                    seen_texts.add(dedupe_key)
-                except Exception:
-                    continue
-
-                # O cartão é procurado subindo a partir do texto da hora.
-                for level in range(1, 11):
-                    ancestor = time_node.locator(f"xpath={'../' * level}.").first
+            if control_count:
+                last_diagnostics.append(f"{context_name}: {control_count} controlo(s) 'Selecionar ida'")
+                for index in range(control_count):
+                    control = controls.nth(index)
                     try:
-                        card_text = " ".join(ancestor.inner_text(timeout=1800).split())
+                        if not control.is_visible(timeout=350):
+                            continue
+                        match = control.evaluate(ancestor_script, trip_time)
                     except Exception:
                         continue
 
-                    if not (25 <= len(card_text) <= 2600):
+                    if not match:
                         continue
+                    card_text = " ".join(str(match.get("text", "")).split())
                     if not time_pattern.search(card_text):
                         continue
                     if not re.search(r"Intercidades|\bIC\b", card_text, re.IGNORECASE):
                         continue
 
-                    # Preferir o ancestral que já contenha o controlo de seleção.
-                    # Se não existir neste nível, guardar o primeiro cartão
-                    # válido e continuar a subir/inspecionar os restantes nós.
-                    try:
-                        select_control = ancestor.get_by_text(
-                            re.compile(r"Selecionar\s+ida", re.IGNORECASE)
-                        ).last
-                        if select_control.count() > 0 and select_control.is_visible(timeout=500):
-                            print(
-                                f"[COMBOIO] Cartão Intercidades identificado no {context_name}, "
-                                f"nível {level}, com botão 'Selecionar ida'."
-                            )
-                            return ancestor
-                    except Exception:
-                        pass
+                    print(
+                        f"[COMBOIO] Cartão Intercidades das {trip_time} encontrado em "
+                        f"{context_name}; controlo de seleção validado."
+                    )
+                    return control, card_text
 
-                    if fallback_card is None:
-                        fallback_card = ancestor
-                        fallback_source = f"{context_name}, nível {level}"
+            # Fallback: em versões em que o controlo não é um button/link/role,
+            # parte do texto da hora e sobe a árvore com evaluate (compatível com
+            # elementos dentro de Shadow DOM aberto).
+            try:
+                time_nodes = context.get_by_text(time_pattern)
+                node_count = min(time_nodes.count(), 30)
+            except Exception:
+                node_count = 0
+                time_nodes = None
 
-    if fallback_card is not None:
-        print(
-            f"[COMBOIO] Cartão Intercidades identificado em {fallback_source}; "
-            "o botão será validado na etapa seguinte."
-        )
-        return fallback_card
+            for node_index in range(node_count):
+                node = time_nodes.nth(node_index)
+                try:
+                    if not node.is_visible(timeout=300):
+                        continue
+                    match = node.evaluate(ancestor_script, trip_time)
+                    if not match:
+                        continue
 
-    # Diagnóstico útil para distinguir falha de carregamento, hora não renderizada
-    # ou resultados apresentados dentro de um contexto não detetado.
-    for context_name, context in contexts:
-        try:
-            body_text = context.locator("body").inner_text(timeout=1800)
-        except Exception:
-            continue
-        normalized = " ".join(body_text.split())
-        position = normalized.find(trip_time)
-        if position >= 0:
-            snippet = normalized[max(0, position - 220): position + 380]
-            print(f"[DEBUG COMBOIO] {context_name}: texto perto de {trip_time}: {snippet}")
-        else:
-            match = re.search(r"Intercidades|\bIC\b", normalized, re.IGNORECASE)
-            if match:
-                snippet = normalized[max(0, match.start() - 120): match.start() + 420]
-                print(f"[DEBUG COMBOIO] {context_name}: resultados encontrados, sem a hora pedida: {snippet}")
+                    card_text = " ".join(str(match.get("text", "")).split())
+                    if not time_pattern.search(card_text):
+                        continue
+                    if not re.search(r"Intercidades|\bIC\b", card_text, re.IGNORECASE):
+                        continue
+
+                    # Encontrar o botão de seleção dentro do mesmo cartão através
+                    # do texto acessível do botão e validar novamente o ancestral.
+                    buttons = context.locator(
+                        "button:visible, a:visible, [role='button']:visible"
+                    ).filter(has_text=select_pattern)
+                    for button_index in range(min(buttons.count(), 80)):
+                        button = buttons.nth(button_index)
+                        try:
+                            button_match = button.evaluate(ancestor_script, trip_time)
+                            if button_match and len(button_match.get("text", "")) <= max(5000, len(match.get("text", "")) + 300):
+                                button_card = " ".join(button_match.get("text", "").split())
+                                if time_pattern.search(button_card) and re.search(
+                                    r"Intercidades|\bIC\b", button_card, re.IGNORECASE
+                                ):
+                                    return button, button_card
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+
+            # Diagnóstico limitado para não despejar toda a página no log.
+            try:
+                body_text = " ".join(context.locator("body").inner_text(timeout=1200).split())
+                if body_text:
+                    time_pos = body_text.find(trip_time)
+                    if time_pos >= 0:
+                        snippet = body_text[max(0, time_pos - 120):time_pos + 260]
+                        last_diagnostics.append(f"{context_name}: texto junto da hora: {snippet}")
+                    elif re.search(r"Intercidades|\bIC\b", body_text, re.IGNORECASE):
+                        match = re.search(r"Intercidades|\bIC\b", body_text, re.IGNORECASE)
+                        snippet = body_text[max(0, match.start() - 80):match.start() + 300]
+                        last_diagnostics.append(f"{context_name}: resultados IC visíveis: {snippet}")
+            except Exception:
+                pass
+
+        if not announced_wait:
+            print(
+                f"[COMBOIO] Resultados ainda sem o Intercidades das {trip_time}; "
+                f"a aguardar até {timeout_seconds}s por carregamento dinâmico."
+            )
+            announced_wait = True
+        page.wait_for_timeout(1000)
+
+    for diagnostic in last_diagnostics[:6]:
+        print(f"[DEBUG COMBOIO] {diagnostic}")
 
     print(
-        f"[COMBOIO] A hora {trip_time} não foi localizada como texto visível "
-        "nos resultados da página nem nos iframes."
+        f"[COMBOIO] Não foi possível validar o botão 'Selecionar ida' associado "
+        f"ao Intercidades das {trip_time} após {timeout_seconds}s."
     )
     return None
 
@@ -970,35 +1004,18 @@ def attempt_ticket_purchase(
             # -----------------------------------------------------------------
             # B. Escolher o Intercidades exato
             # -----------------------------------------------------------------
-            train_card = find_specific_train_card(page, trip_time)
-            if train_card is None:
-                return False, f"Comboio Intercidades das {trip_time} não encontrado.", None
+            train_result = find_specific_train_card(page, trip_time, timeout_seconds=25)
+            if train_result is None:
+                return False, f"Comboio Intercidades das {trip_time} não encontrado/validado nos resultados.", None
 
-            # Tentar subir mais dois níveis se o cartão encontrado não incluir
-            # o botão de seleção.
-            for _ in range(2):
-                try:
-                    if train_card.get_by_text(re.compile("Selecionar ida", re.IGNORECASE)).count() > 0:
-                        break
-                    parent = train_card.locator("xpath=../.").first
-                    if parent.count() == 0 or len(parent.inner_text()) > 2200:
-                        break
-                    train_card = parent
-                except Exception:
-                    break
-
-            card_text = " ".join(train_card.inner_text().split())
+            select_outbound, card_text = train_result
             print(f"[DEBUG COMBOIO] {card_text[:1200]}")
             if not re.search(r"Intercidades|\bIC\b", card_text, re.IGNORECASE):
                 return False, "O cartão localizado não foi identificado como Intercidades.", None
-            if trip_time not in card_text:
+            if not re.search(rf"(?<!\d){re.escape(trip_time)}(?!\d)", card_text):
                 return False, "A hora do cartão localizado não corresponde à hora pedida.", None
-
-            select_outbound = train_card.get_by_text(
-                re.compile(r"Selecionar\s+ida", re.IGNORECASE)
-            ).last
-            if select_outbound.count() == 0 or not locator_visible(select_outbound, 4000):
-                return False, "Botão 'Selecionar ida' não encontrado no comboio pretendido.", None
+            if not locator_visible(select_outbound, 4000):
+                return False, "Botão 'Selecionar ida' não está visível no comboio pretendido.", None
 
             print("[IDA] A selecionar o comboio pretendido.")
             select_outbound.click(timeout=10000)
