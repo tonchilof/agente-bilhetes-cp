@@ -286,22 +286,30 @@ def attempt_ticket_purchase(
                 return False, f"Cartão individual do Intercidades das {trip_time} não encontrado.", None
 
             card_text = train_card.inner_text()
-            print(f"[DEBUG COMBOIO] Cartão exato selecionado: {card_text.replace(chr(10), ' | ')}")
+            # Sobe mais 2 níveis caso o bloco de tarifa/botão esteja no contentor pai da linha do comboio
+            row_container = train_card.locator("xpath=../..").first
+            if row_container.count() > 0 and len(row_container.inner_text()) < 1500:
+                train_card = row_container
+                card_text = train_card.inner_text()
+                print(f"[DEBUG COMBOIO EXPANDIDO] {card_text.replace(chr(10), ' | ')}")
 
-            if any(word in card_text for word in ["Lotado", "Esgotado", "Indisponível"]):
-                return False, f"Comboio das {trip_time} encontra-se lotado.", None
-
-            action_btn = train_card.locator("button, a[role='button'], [class*='price'], [class*='select']").first
-            if action_btn.count() > 0 and action_btn.is_visible():
-                action_btn.click()
+            # Tenta clicar num botão/preço visível dentro do cartão; se não houver, clica no próprio cartão
+            clickable_inside = train_card.locator("button:visible, a:visible, [role='button']:visible").first
+            if clickable_inside.count() > 0:
+                print(f"[CLIQUE CARTÃO] A clicar em elemento interativo dentro do cartão: {clickable_inside.inner_text().strip()}")
+                clickable_inside.click()
             else:
+                print("[CLIQUE CARTÃO] A clicar diretamente no cartão do comboio.")
                 train_card.click()
-            page.wait_for_timeout(2500)
 
+            page.wait_for_timeout(1500)
+
+            # Procura botão de avançar / comprar (pode aparecer só após selecionar a linha/tarifa)
             continue_btn = page.locator(
-                "button:has-text('Continuar'), button:has-text('Avançar'), button:has-text('Comprar'), button:has-text('Seguinte')"
+                "button:visible:has-text('Continuar'), button:visible:has-text('Avançar'), button:visible:has-text('Comprar'), button:visible:has-text('Seguinte'), button:visible:has-text('Reservar')"
             ).first
-            if continue_btn.is_visible(timeout=4000):
+            if continue_btn.count() > 0:
+                print(f"[AVANÇAR] A clicar em '{continue_btn.inner_text().strip()}'...")
                 continue_btn.click()
                 page.wait_for_timeout(3000)
 
