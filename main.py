@@ -593,6 +593,135 @@ def select_green_pass(page) -> bool:
     return False
 
 
+def set_checkbox_for_statement(page, pattern: re.Pattern[str], description: str) -> bool:
+    """Marca e verifica uma declaração específica, sem tocar em opções de marketing."""
+    checkbox = page.get_by_role("checkbox", name=pattern).last
+    try:
+        if checkbox.count() > 0:
+            if not checkbox.is_checked():
+                checkbox.check(force=True, timeout=4000)
+            if checkbox.is_checked():
+                print(f"[DECLARAÇÃO] Confirmada: {description}")
+                return True
+    except Exception:
+        pass
+
+    labels = page.locator("label").filter(has_text=pattern)
+    try:
+        for index in range(labels.count()):
+            label = labels.nth(index)
+            nested_checkbox = label.locator("input[type='checkbox']").first
+            try:
+                if nested_checkbox.count() > 0:
+                    if not nested_checkbox.is_checked():
+                        nested_checkbox.check(force=True, timeout=4000)
+                    if nested_checkbox.is_checked():
+                        print(f"[DECLARAÇÃO] Confirmada: {description}")
+                        return True
+            except Exception:
+                pass
+
+            try:
+                label.click(force=True, timeout=4000)
+                if nested_checkbox.count() > 0 and nested_checkbox.is_checked():
+                    print(f"[DECLARAÇÃO] Confirmada: {description}")
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    print(f"[DECLARAÇÃO] Não foi possível confirmar: {description}")
+    return False
+
+
+def prepare_intermediate_purchase_step(page) -> tuple[bool, str]:
+    """Confirma declarações da página-resumo e avança para os dados do passageiro."""
+    body_text = page.locator("body").inner_text(timeout=7000)
+    normalized = " ".join(body_text.split())
+
+    advance_pattern = re.compile(r"Avançar\s+para\s+compra", re.IGNORECASE)
+    advance_button = page.get_by_role("button", name=advance_pattern).last
+    if advance_button.count() == 0 or not locator_visible(advance_button, 1500):
+        advance_button = page.get_by_role("link", name=advance_pattern).last
+
+    # Esta etapa só é necessária quando o portal apresenta o ecrã de resumo.
+    if advance_button.count() == 0 or not locator_visible(advance_button, 1500):
+        if re.search(r"input.*nome|Nome do passageiro", normalized, re.IGNORECASE):
+            return True, "Formulário do passageiro já disponível."
+        return False, "A página não apresenta o botão 'Avançar para compra'."
+
+    print("[COMPRA] Página-resumo detetada; a confirmar declarações obrigatórias.")
+
+    conditions_pattern = re.compile(r"Condições\s+de\s+venda", re.IGNORECASE)
+    privacy_pattern = re.compile(
+        r"Termos.*Política\s+de\s+Privacidade|Política\s+de\s+Privacidade",
+        re.IGNORECASE,
+    )
+    age_pattern = re.compile(r"Tenho\s+mais\s+de\s+16\s+anos|mais\s+de\s+16\s+anos", re.IGNORECASE)
+
+    if re.search(conditions_pattern, normalized):
+        if not set_checkbox_for_statement(page, conditions_pattern, "Condições de venda"):
+            return False, "Não foi possível confirmar as Condições de venda."
+
+    if re.search(privacy_pattern, normalized):
+        if not set_checkbox_for_statement(page, privacy_pattern, "Termos e Política de Privacidade"):
+            return False, "Não foi possível confirmar os Termos e a Política de Privacidade."
+
+    if re.search(age_pattern, normalized):
+        # A automação não deve declarar uma idade que não tenha sido configurada.
+        if os.getenv("PASSENGER_OVER_16", "").strip().lower() != "true":
+            return False, (
+                "A página exige a declaração 'Tenho mais de 16 anos'. "
+                "Defina PASSENGER_OVER_16=true apenas se a declaração for verdadeira."
+            )
+        if not set_checkbox_for_statement(page, age_pattern, "Mais de 16 anos"):
+            return False, "Não foi possível confirmar a declaração de idade."
+
+    if not dismiss_blocking_modal(page):
+        return False, "Existe um diálogo a bloquear o botão 'Avançar para compra'."
+
+    # Voltar a localizar o botão após as caixas de seleção, pois a página pode
+    # atualizar o estado do controlo dinamicamente.
+    advance_button = page.get_by_role("button", name=advance_pattern).last
+    if advance_button.count() == 0 or not locator_visible(advance_button, 2500):
+        advance_button = page.get_by_role("link", name=advance_pattern).last
+    if advance_button.count() == 0 or not locator_visible(advance_button, 2500):
+        return False, "O botão 'Avançar para compra' desapareceu após confirmar as declarações."
+
+    print("[COMPRA] A avançar para o formulário do passageiro.")
+    advance_button.scroll_into_view_if_needed()
+    advance_button.click(timeout=10000)
+
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=12000)
+    except PlaywrightTimeoutError:
+        pass
+
+    name_selectors = [
+        "input[name*='nome' i]",
+        "input[placeholder*='Nome' i]",
+        "input[id*='nome' i]",
+    ]
+    deadline = time.monotonic() + 25
+    while time.monotonic() < deadline:
+        name_field = first_existing(page, name_selectors)
+        if name_field is not None and locator_visible(name_field, 500):
+            print("[PASSAGEIROS] Formulário do passageiro apresentado.")
+            return True, "Formulário do passageiro disponível."
+
+        current_text = " ".join(page.locator("body").inner_text(timeout=3000).split())
+        if "Não foi possível iniciar o processo de compra" in current_text:
+            return False, "A CP informou que não foi possível iniciar o processo de compra."
+        page.wait_for_timeout(500)
+
+    current_text = " ".join(page.locator("body").inner_text(timeout=5000).split())
+    return False, (
+        "O botão 'Avançar para compra' foi acionado, mas o formulário do passageiro "
+        f"não apareceu. URL: {page.url}. Ecrã: {current_text[-1000:]}"
+    )
+
+
 def accept_terms_if_present(page) -> bool:
     terms_pattern = re.compile(r"termos|condições gerais|condicoes gerais", re.IGNORECASE)
     labels = page.locator("label").filter(has_text=terms_pattern)
@@ -898,6 +1027,13 @@ def attempt_ticket_purchase(
             if "Não foi possível iniciar o processo de compra" in body_text:
                 return False, "A CP indicou que não foi possível iniciar o processo de compra.", None
 
+            # O portal CP apresenta primeiro um ecrã-resumo, com declarações
+            # obrigatórias e o botão "Avançar para compra". Só depois desse
+            # passo é disponibilizado o formulário do passageiro.
+            step_ok, step_details = prepare_intermediate_purchase_step(page)
+            if not step_ok:
+                return False, step_details, None
+
             # -----------------------------------------------------------------
             # D. Dados do passageiro e Passe Ferroviário Verde
             # -----------------------------------------------------------------
@@ -923,11 +1059,12 @@ def attempt_ticket_purchase(
             # Esperar pelo formulário, em vez de clicar antecipadamente num
             # possível botão Continuar antes de preencher os dados.
             name_locator = first_existing(page, name_selectors)
-            if name_locator is None or not locator_visible(name_locator, 10000):
+            if name_locator is None or not locator_visible(name_locator, 15000):
+                latest_body = " ".join(page.locator("body").inner_text(timeout=5000).split())
                 return (
                     False,
-                    f"Formulário do passageiro não encontrado. URL: {page.url}. "
-                    f"Ecrã: {' '.join(body_text.split())[-900:]}",
+                    f"Formulário do passageiro não encontrado após avançar. URL: {page.url}. "
+                    f"Ecrã: {latest_body[-1100:]}",
                     None,
                 )
 
