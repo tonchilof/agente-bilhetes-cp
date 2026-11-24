@@ -1367,7 +1367,49 @@ def attempt_ticket_purchase(
                 except Exception as exc:
                     print(f"[AVISO DOC] Não foi possível selecionar o tipo de documento: {exc}")
 
-            if not fill_required_field(page, id_selectors, passenger_id, "Identificação"):
+            if doc_option is not None:
+                        doc_option.click(timeout=4000)
+                        page.wait_for_timeout(500)
+                        print(f"[DOC] Tipo de documento selecionado: {doc_option.inner_text().strip()}")
+                except Exception as exc:
+                    print(f"[AVISO DOC] Não foi possível selecionar o tipo de documento: {exc}")
+
+            id_filled = fill_required_field(page, id_selectors, passenger_id, "Identificação")
+            if not id_filled:
+                doc_section = page.locator("text=/N[úu]mero do documento de identifica[çc][aã]o/i").first
+                if doc_section.count() > 0:
+                    for rel_sel in (
+                        "xpath=following::input[1]",
+                        "xpath=../following::input[1]",
+                        "xpath=../../following::input[1]",
+                        "xpath=following-sibling::input[1]",
+                    ):
+                        cand = doc_section.locator(rel_sel).first
+                        try:
+                            if cand.count() > 0 and locator_visible(cand, 1000):
+                                cand.fill(passenger_id, timeout=5000)
+                                id_filled = True
+                                break
+                        except Exception:
+                            continue
+
+            if not id_filled:
+                try:
+                    visible_inputs = page.locator("input:visible")
+                    for idx in range(visible_inputs.count()):
+                        inp = visible_inputs.nth(idx)
+                        inp_type = (inp.get_attribute("type") or "").lower()
+                        if inp_type in ("text", "tel", "number", ""):
+                            curr_val = (inp.input_value() or "").strip()
+                            if not curr_val:
+                                inp.fill(passenger_id, timeout=5000)
+                                id_filled = True
+                                break
+                except Exception:
+                    pass
+
+            if not id_filled:
+                
                 return False, "Não foi possível preencher o documento de identificação.", None
 
             # Seleciona "Passe Ferroviário Verde" a partir do seletor de Desconto (ex: "Inteiro")
