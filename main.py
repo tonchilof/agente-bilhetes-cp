@@ -1402,14 +1402,18 @@ def attempt_ticket_purchase(
                     "input[name*='passe' i]",
                     "input[id*='cartao' i]",
                     "input[id*='passe' i]",
+                    "input[name*='verde' i]",
+                    "input[placeholder*='passe' i]",
+                    "input[placeholder*='cartão' i]",
                 ],
             )
-            if extra_info is None or not locator_visible(extra_info, 3000):
-                return False, "Campo para o código/número do Passe Ferroviário Verde não encontrado.", None
-            try:
-                extra_info.fill(pass_code, timeout=5000)
-            except Exception as exc:
-                return False, f"Não foi possível preencher o código do passe: {exc}", None
+            if extra_info is not None and locator_visible(extra_info, 1500):
+                try:
+                    extra_info.fill(pass_code, timeout=5000)
+                except Exception as exc:
+                    return False, f"Não foi possível preencher o código do passe: {exc}", None
+            else:
+                print("[PASSE] Campo do código/número do passe não presente neste ecrã; a prosseguir.")
 
             continue_button = find_visible_button(page, ["Continuar", "Avançar", "Seguinte"])
             if continue_button is None:
