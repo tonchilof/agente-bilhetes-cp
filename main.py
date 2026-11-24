@@ -1310,17 +1310,6 @@ def attempt_ticket_purchase(
                 "input[placeholder*='Nome' i]",
                 "input[id*='nome' i]",
             ]
-            id_selectors = [
-                "input[name*='documento' i]",
-                "input[name*='identificacao' i]",
-                "input[name*='identificação' i]",
-                "input[placeholder*='Identificação' i]",
-                "input[placeholder*='documento' i]",
-                "input[id*='documento' i]",
-                "input[id*='identificacao' i]",
-                "input[aria-label*='Identificação' i]",
-                "input[aria-label*='documento' i]",
-            ]
             email_selectors = [
                 "input[type='email']",
                 "input[name*='email' i]",
@@ -1343,7 +1332,6 @@ def attempt_ticket_purchase(
             if not fill_required_field(page, email_selectors, passenger_email, "E-mail"):
                 return False, "Não foi possível preencher o e-mail do passageiro.", None
 
-            # Seleciona tipo de documento se estiver em "Selecione o documento"
             doc_trigger = page.locator("text=/Selecione o documento/i").first
             if doc_trigger.count() > 0 and locator_visible(doc_trigger, 1500):
                 try:
@@ -1354,9 +1342,9 @@ def attempt_ticket_purchase(
                         re.compile(r"cart[aã]o\s+de\s+cidad[aã]o|cc", re.IGNORECASE),
                         re.compile(r"passaporte|outro|documento", re.IGNORECASE),
                     ):
-                        cand = page.locator("[role='option']:visible, li:visible, button:visible, div:visible, span:visible").filter(
-                            has_text=opt_regex
-                        ).last
+                        cand = page.locator(
+                            "[role='option']:visible, li:visible, button:visible, div:visible, span:visible"
+                        ).filter(has_text=opt_regex).last
                         if cand.count() > 0 and locator_visible(cand, 600):
                             doc_option = cand
                             break
@@ -1367,104 +1355,61 @@ def attempt_ticket_purchase(
                 except Exception as exc:
                     print(f"[AVISO DOC] Não foi possível selecionar o tipo de documento: {exc}")
 
-            id_filled = fill_required_field(page, id_selectors, passenger_id, "Identificação")
-            if not id_filled:
-                doc_section = page.locator("text=/N[úu]mero do documento de identifica[çc][aã]o/i").first
-                if doc_section.count() > 0:
-                    for rel_sel in (
-                        "xpath=following::input[1]",
-                        "xpath=../following::input[1]",
-                        "xpath=../../following::input[1]",
-                        "xpath=following-sibling::input[1]",
-                    ):
-                        cand = doc_section.locator(rel_sel).first
-                        try:
-                            if cand.count() > 0 and locator_visible(cand, 1000):
-                                cand.fill(passenger_id, timeout=5000)
-                                id_filled = True
-                                break
-                        except Exception:
-                            continue
-
-            if not id_filled:
-                try:
-                    visible_inputs = page.locator("input:visible")
-                    for idx in range(visible_inputs.count()):
-                        inp = visible_inputs.nth(idx)
-                        inp_type = (inp.get_attribute("type") or "").lower()
-                        if inp_type in ("text", "tel", "number", ""):
-                            curr_val = (inp.input_value() or "").strip()
-                            if not curr_val:
-                                inp.fill(passenger_id, timeout=5000)
-                                id_filled = True
-                                break
-                except Exception:
-                    pass
+            id_filled = False
+            try:
+                visible_inputs = page.locator("input:visible")
+                for idx in range(visible_inputs.count()):
+                    inp = visible_inputs.nth(idx)
+                    inp_type = (inp.get_attribute("type") or "").lower()
+                    if inp_type in ("text", "tel", "number", ""):
+                        curr_val = (inp.input_value() or "").strip()
+                        if not curr_val:
+                            inp.fill(passenger_id, timeout=5000)
+                            id_filled = True
+                            print(f"[DOC] Número de identificação preenchido no campo visível #{idx}.")
+                            break
+            except Exception as exc:
+                print(f"[AVISO DOC] Falha ao preencher número de identificação: {exc}")
 
             if not id_filled:
                 return False, "Não foi possível preencher o documento de identificação.", None
 
             discount_selected = False
-            discount_triggers = [
-                page.locator("text=/^\\s*Inteiro\\s*$/i").last,
-                page.locator("button:has-text('Desconto'), [role='combobox'][aria-label*='desconto' i]").first,
-            ]
-            for d_trig in discount_triggers:
-                try:
-                    if d_trig.count() > 0 and locator_visible(d_trig, 1000):
-                        d_trig.scroll_into_view_if_needed(timeout=3000)
-                        d_trig.click(timeout=4000)
-                        page.wait_for_timeout(700)
-                        pass_opt = page.locator(
-                            "[role='option']:visible, li:visible, button:visible, div:visible, span:visible"
-                        ).filter(has_text=re.compile(r"ferroviario\s*verde|passe\s*verde", re.IGNORECASE))
-                        for p_idx in range(pass_opt.count()):
-                            cand = pass_opt.nth(p_idx)
+            try:
+                inteiro_el = page.locator("text=/^\\s*Inteiro\\s*$/i").last
+                if inteiro_el.count() > 0 and locator_visible(inteiro_el, 1500):
+                    inteiro_el.scroll_into_view_if_needed(timeout=3000)
+                    inteiro_el.click(timeout=4000, force=True)
+                    page.wait_for_timeout(800)
+
+                    options_Dump = []
+                    cands = page.locator(
+                        "[role='option']:visible, [role='menuitem']:visible, li:visible, button:visible, div:visible, span:visible"
+                    )
+                    for c_idx in range(min(cands.count(), 150)):
+                        cand = cands.nth(c_idx)
+                        try:
                             txt = " ".join((cand.inner_text() or "").split())
-                            if txt and len(txt) < 120 and "ferroviario" in _normalize_text(txt):
-                                cand.click(timeout=4000)
+                            if not txt or len(txt) > 100:
+                                continue
+                            norm_txt = _normalize_text(txt)
+                            if any(k in norm_txt for k in ("inteiro", "verde", "jovem", "senior", "crianca", "desconto")):
+                                options_Dump.append(txt)
+                            if "ferroviario" in norm_txt and "verde" in norm_txt:
+                                cand.click(timeout=4000, force=True)
                                 page.wait_for_timeout(600)
                                 print(f"[DESCONTO] Selecionado: {txt}")
                                 discount_selected = True
                                 break
-                    if discount_selected:
-                        break
-                except Exception as exc:
-                    print(f"[AVISO DESCONTO] Tentativa de abrir desconto falhou: {exc}")
+                        except Exception:
+                            continue
 
-            if not discount_selected and not select_green_pass(page):
-                return False, "Não foi possível selecionar Passe Ferroviário Verde.", None
+                    if not discount_selected:
+                        print(f"[DEBUG OPÇÕES DESCONTO] {list(dict.fromkeys(options_Dump))[:15]}")
+            except Exception as exc:
+                print(f"[AVISO DESCONTO] Erro ao abrir/selecionar desconto: {exc}")
 
-            # Seleciona "Passe Ferroviário Verde" a partir do seletor de Desconto (ex: "Inteiro")
-            discount_selected = False
-            discount_triggers = [
-                page.locator("text=/^\\s*Inteiro\\s*$/i").last,
-                page.locator("button:has-text('Desconto'), [role='combobox'][aria-label*='desconto' i]").first,
-            ]
-            for d_trig in discount_triggers:
-                try:
-                    if d_trig.count() > 0 and locator_visible(d_trig, 1000):
-                        d_trig.scroll_into_view_if_needed(timeout=3000)
-                        d_trig.click(timeout=4000)
-                        page.wait_for_timeout(700)
-                        pass_opt = page.locator(
-                            "[role='option']:visible, li:visible, button:visible, div:visible, span:visible"
-                        ).filter(has_text=re.compile(r"ferroviario\s*verde|passe\s*verde", re.IGNORECASE))
-                        for p_idx in range(pass_opt.count()):
-                            cand = pass_opt.nth(p_idx)
-                            txt = " ".join((cand.inner_text() or "").split())
-                            if txt and len(txt) < 120 and "ferroviario" in _normalize_text(txt):
-                                cand.click(timeout=4000)
-                                page.wait_for_timeout(600)
-                                print(f"[DESCONTO] Selecionado: {txt}")
-                                discount_selected = True
-                                break
-                    if discount_selected:
-                        break
-                except Exception as exc:
-                    print(f"[AVISO DESCONTO] Tentativa de abrir desconto falhou: {exc}")
-
-            if not discount_selected and not select_green_pass(page):
+            if not discount_selected:
                 return False, "Não foi possível selecionar Passe Ferroviário Verde.", None
 
             extra_info = first_existing(
