@@ -650,50 +650,68 @@ def fill_required_field(page, selectors: list[str], value: str, field_label: str
 
 
 def select_green_pass(page) -> bool:
-    select_locator = first_existing(
-        page,
-        [
-            "select[name*='desconto' i]",
-            "select[id*='desconto' i]",
-            "select[name*='tarifa' i]",
-        ],
-    )
+    pass_pattern = re.compile(r"ferroviario\s*verde|passe\s*verde", re.IGNORECASE)
 
-    if select_locator is not None and locator_visible(select_locator, 1500):
-        try:
-            options = select_locator.locator("option").all_text_contents()
-            matching_option = next(
-                (option.strip() for option in options if "Passe Ferroviário Verde" in option),
-                None,
-            )
-            if matching_option:
-                select_locator.select_option(label=matching_option)
-                print("[DESCONTO] Passe Ferroviário Verde selecionado.")
-                return True
-        except Exception as exc:
-            print(f"[DESCONTO] Falha ao selecionar a opção no menu: {exc}")
+    # 1. Tenta qualquer <select> visível na página que contenha a opção pretendida
+    try:
+        selects = page.locator("select:visible")
+        for idx in range(selects.count()):
+            sel = selects.nth(idx)
+            options = sel.locator("option").all_text_contents()
+            for opt in options:
+                clean_opt = " ".join(opt.split())
+                if pass_pattern.search(_normalize_text(clean_opt)):
+                    sel.select_option(label=opt)
+                    print(f"[DESCONTO] Selecionado no <select>: {clean_opt}")
+                    return True
+    except Exception as exc:
+        print(f"[DESCONTO] Aviso ao inspecionar <select>: {exc}")
 
+    # 2. Tenta triggers de desconto / tarifa (botão, combobox, label ou div clicável)
     trigger = first_existing(
         page,
         [
+            "[role='combobox'][aria-label*='desconto' i]",
+            "[role='combobox'][id*='desconto' i]",
+            "button[aria-label*='desconto' i]",
             "button:has-text('Desconto')",
             "button:has-text('Sem desconto')",
-            "[aria-label*='Desconto' i]",
+            "label:has-text('Desconto') + *",
             "label:has-text('Desconto')",
+            "text=/^\\s*Sem\\s+desconto\\s*$/i",
         ],
     )
 
     if trigger is not None and locator_visible(trigger, 2500):
         try:
-            trigger.click(timeout=3000)
-            page.wait_for_timeout(500)
-            option = page.get_by_text("Passe Ferroviário Verde", exact=False).last
-            if locator_visible(option, 2500):
-                option.click(timeout=3000)
-                print("[DESCONTO] Passe Ferroviário Verde selecionado.")
-                return True
+            trigger.scroll_into_view_if_needed(timeout=3000)
+            trigger.click(timeout=4000)
+            page.wait_for_timeout(700)
+
+            # Procura opção visível em listbox / option / lista / texto
+            option_candidates = page.locator(
+                "[role='option']:visible, li:visible, button:visible, div[class*='option']:visible, span:visible"
+            )
+            for idx in range(min(option_candidates.count(), 80)):
+                cand = option_candidates.nth(idx)
+                try:
+                    txt = " ".join((cand.inner_text() or "").split())
+                    if txt and len(txt) < 120 and pass_pattern.search(_normalize_text(txt)):
+                        cand.click(timeout=4000)
+                        print(f"[DESCONTO] Selecionado na lista: {txt}")
+                        return True
+                except Exception:
+                    continue
         except Exception as exc:
             print(f"[DESCONTO] Falha ao abrir/selecionar desconto: {exc}")
+
+    # 3. Diagnóstico rápido para ver controlos e opções disponíveis em /compra-online
+    try:
+        select_options = page.locator("select option").all_text_contents()
+        clean_opts = [" ".join(o.split()) for o in select_options if o.strip()]
+        print(f"[DEBUG DESCONTO] Opções <select>: {clean_opts[:15]}")
+    except Exception:
+        pass
 
     print("[DESCONTO] Não foi possível selecionar Passe Ferroviário Verde.")
     return False
