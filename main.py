@@ -1367,13 +1367,6 @@ def attempt_ticket_purchase(
                 except Exception as exc:
                     print(f"[AVISO DOC] Não foi possível selecionar o tipo de documento: {exc}")
 
-            if doc_option is not None:
-                        doc_option.click(timeout=4000)
-                        page.wait_for_timeout(500)
-                        print(f"[DOC] Tipo de documento selecionado: {doc_option.inner_text().strip()}")
-                except Exception as exc:
-                    print(f"[AVISO DOC] Não foi possível selecionar o tipo de documento: {exc}")
-
             id_filled = fill_required_field(page, id_selectors, passenger_id, "Identificação")
             if not id_filled:
                 doc_section = page.locator("text=/N[úu]mero do documento de identifica[çc][aã]o/i").first
@@ -1392,7 +1385,7 @@ def attempt_ticket_purchase(
                                 break
                         except Exception:
                             continue
-
+                            
             if not id_filled:
                 try:
                     visible_inputs = page.locator("input:visible")
