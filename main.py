@@ -1419,7 +1419,26 @@ def attempt_ticket_purchase(
             if continue_button is None:
                 return False, "Botão para validar os dados do passageiro não encontrado.", None
 
-            continue_button.click(timeout=8000)
+            continue_button = find_visible_button(page, ["Continuar", "Avançar", "Seguinte"])
+            if continue_button is None:
+                return False, "Botão para validar os dados do passageiro não encontrado.", None
+
+            try:
+                if not continue_button.is_enabled(timeout=4000):
+                    select_green_pass(page)
+                    page.wait_for_timeout(800)
+                continue_button.wait_for(state="attached", timeout=5000)
+                if not continue_button.is_enabled(timeout=8000):
+                    debug_txt = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
+                    print(f"[DEBUG AVANÇAR DISABLED] {debug_txt[-900:]}")
+                    return False, "Botão 'Avançar' permaneceu desativado no formulário do passageiro.", None
+                continue_button.click(timeout=8000)
+                
+            except PlaywrightTimeoutError:
+                debug_txt = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
+                print(f"[DEBUG AVANÇAR DISABLED] {debug_txt[-900:]}")
+                return False, "Botão 'Avançar' desativado após timeout no formulário do passageiro.", None
+
             try:
                 page.wait_for_load_state("domcontentloaded", timeout=10000)
             except PlaywrightTimeoutError:
