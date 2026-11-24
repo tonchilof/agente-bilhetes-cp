@@ -704,44 +704,101 @@ def set_checkbox_for_statement(page, pattern: re.Pattern[str], description: str)
 
 
 def continue_as_guest_if_prompted(page) -> tuple[bool, str]:
-    """Deteta a autenticação CP e escolhe explicitamente a opção de convidado."""
-    try:
-        body = " ".join(page.locator("body").inner_text(timeout=7000).split())
-    except Exception as exc:
-        return False, f"Não foi possível ler a página de autenticação da CP: {exc}"
-
-    guest_pattern = re.compile(r"Continuar\s+como\s+convidado", re.IGNORECASE)
-    auth_pattern = re.compile(
-        r"Antes\s+de\s+continuar|escolha\s+como\s+prosseguir|Fazer\s+login|myCP",
+    """Aguarda o fim do ecrã de carregamento da CP e seleciona 'Continuar como convidado'."""
+    guest_pattern = re.compile(
+        r"Continuar\s+como\s+convidado|Prosseguir\s+como\s+convidado|Comprar\s+sem\s+registo|Sem\s+login",
         re.IGNORECASE,
     )
+    auth_pattern = re.compile(
+        r"Antes\s+de\s+continuar|escolha\s+como\s+prosseguir|Fazer\s+login|myCP|Iniciar\s+sessão",
+        re.IGNORECASE,
+    )
+    loading_pattern = re.compile(r"Por\s+favor\s+aguarde\s+um\s+momento", re.IGNORECASE)
+    name_selectors = [
+        "input[name*='nome' i]",
+        "input[placeholder*='Nome' i]",
+        "input[id*='nome' i]",
+    ]
 
-    guest_button = None
-    for role in ("button", "link"):
-        candidate = page.get_by_role(role, name=guest_pattern).last
+    deadline = time.monotonic() + 22
+    last_body = ""
+
+    while time.monotonic() < deadline:
         try:
-            if candidate.count() > 0 and locator_visible(candidate, 700):
-                guest_button = candidate
-                break
+            last_body = " ".join(page.locator("body").inner_text(timeout=3000).split())
         except Exception:
-            pass
+            page.wait_for_timeout(500)
+            continue
 
-    if guest_button is None:
-        candidate = page.get_by_text(guest_pattern, exact=False).last
-        try:
-            if candidate.count() > 0 and locator_visible(candidate, 700):
-                guest_button = candidate
-        except Exception:
-            pass
+        # 1. Se o portal saltou a autenticação e já abriu o formulário do passageiro
+        name_field = first_existing(page, name_selectors)
+        if name_field is not None and locator_visible(name_field, 400):
+            return True, "Formulário do passageiro já apresentado sem passo de autenticação."
 
-    if guest_button is None:
-        if auth_pattern.search(body):
-            return False, (
-                "A CP apresentou a página de autenticação, mas o controlo "
-                "'Continuar como convidado' não foi encontrado/ficou invisível. "
-                f"Ecrã: {body[-900:]}"
-            )
-        return True, "Não foi apresentado o passo de autenticação."
+        # 2. Se ainda está na transição "Por favor aguarde um momento...", continua a aguardar
+        if loading_pattern.search(last_body) and not guest_pattern.search(last_body):
+            page.wait_for_timeout(600)
+            continue
+
+        # 3. Procura o controlo de convidado (atravessa Shadow DOM via CSS/get_by_text)
+        guest_button = None
+        for selector in (
+            "button:visible",
+            "a:visible",
+            "[role='button']:visible",
+        ):
+            candidate = page.locator(selector).filter(has_text=guest_pattern).last
+            try:
+                if candidate.count() > 0 and locator_visible(candidate, 400):
+                    guest_button = candidate
+                    break
+            except Exception:
+                continue
+
+        if guest_button is None:
+            candidate = page.get_by_text(guest_pattern, exact=False).last
+            try:
+                if candidate.count() > 0 and locator_visible(candidate, 400):
+                    guest_button = candidate
+            except Exception:
+                pass
+
+        if guest_button is not None:
+            try:
+                print("[CONVIDADO] A selecionar 'Continuar como convidado'.")
+                guest_button.scroll_into_view_if_needed(timeout=4000)
+                guest_button.click(timeout=10000)
+                try:
+                    page.wait_for_load_state("domcontentloaded", timeout=12000)
+                except PlaywrightTimeoutError:
+                    pass
+                try:
+                    page.wait_for_load_state("networkidle", timeout=8000)
+                except PlaywrightTimeoutError:
+                    pass
+                page.wait_for_timeout(1200)
+                print(f"[CONVIDADO] Continuação como convidado iniciada. URL: {page.url}")
+                return True, "Continuação como convidado iniciada."
+            except Exception as exc:
+                return False, f"Não foi possível clicar em 'Continuar como convidado': {exc}"
+
+        page.wait_for_timeout(600)
+
+    # Se esgotou o tempo de espera, devolve diagnóstico claro do estado final
+    if loading_pattern.search(last_body):
+        return False, (
+            "A página da CP permaneceu presa em 'Por favor aguarde um momento...' após 22s. "
+            f"URL: {page.url}"
+        )
+
+    if auth_pattern.search(last_body):
+        return False, (
+            "A CP apresentou a página de autenticação, mas o controlo "
+            "'Continuar como convidado' não ficou visível após 22s. "
+            f"URL: {page.url}. Ecrã: {last_body[-900:]}"
+        )
+
+    return True, "Não foi detetado ecrã de autenticação após espera."
 
     try:
         print("[CONVIDADO] A selecionar 'Continuar como convidado'.")
