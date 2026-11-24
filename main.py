@@ -1278,10 +1278,26 @@ def attempt_ticket_purchase(
             id_selectors = [
                 "input[name*='documento' i]",
                 "input[name*='identificacao' i]",
+                "input[name*='identificação' i]",
+                "input[name*='nif' i]",
+                "input[name*='cc' i]",
+                "input[name*='doc' i]",
+                "input[name*='passaporte' i]",
                 "input[placeholder*='Identificação' i]",
+                "input[placeholder*='identificacao' i]",
                 "input[placeholder*='Cartão' i]",
+                "input[placeholder*='Documento' i]",
+                "input[placeholder*='NIF' i]",
+                "input[placeholder*='CC' i]",
                 "input[id*='documento' i]",
                 "input[id*='identificacao' i]",
+                "input[id*='nif' i]",
+                "input[id*='cc' i]",
+                "input[id*='doc' i]",
+                "input[aria-label*='Identificação' i]",
+                "input[aria-label*='Documento' i]",
+                "input[aria-label*='Cartão' i]",
+                "input[aria-label*='NIF' i]",
             ]
             email_selectors = [
                 "input[type='email']",
@@ -1304,8 +1320,38 @@ def attempt_ticket_purchase(
             print("[PASSAGEIROS] Formulário detetado.")
             if not fill_required_field(page, name_selectors, passenger_name, "Nome"):
                 return False, "Não foi possível preencher o nome do passageiro.", None
-            if not fill_required_field(page, id_selectors, passenger_id, "Identificação"):
+
+            id_filled = fill_required_field(page, id_selectors, passenger_id, "Identificação")
+            if not id_filled:
+                # Tentativa adicional via label visível (atravessa estruturas mais complexas)
+                label_doc = page.get_by_label(
+                    re.compile(r"identifica|documento|cart[aã]o|nif|passaporte", re.IGNORECASE)
+                ).first
+                try:
+                    if label_doc.count() > 0 and locator_visible(label_doc, 1500):
+                        label_doc.fill(passenger_id, timeout=5000)
+                        id_filled = True
+                except Exception:
+                    pass
+
+            if not id_filled:
+                # Diagnóstico dos campos visíveis em /compra-online
+                try:
+                    inputs_info = page.locator("input:visible").evaluate_all(
+                        """els => els.map(e => ({
+                            tag: e.tagName,
+                            type: e.type || '',
+                            name: e.name || '',
+                            id: e.id || '',
+                            placeholder: e.placeholder || '',
+                            ariaLabel: e.getAttribute('aria-label') || ''
+                        }))"""
+                    )
+                    print(f"[DEBUG INPUTS COMPRA] {inputs_info[:12]}")
+                except Exception:
+                    pass
                 return False, "Não foi possível preencher o documento de identificação.", None
+
             if not fill_required_field(page, email_selectors, passenger_email, "E-mail"):
                 return False, "Não foi possível preencher o e-mail do passageiro.", None
 
