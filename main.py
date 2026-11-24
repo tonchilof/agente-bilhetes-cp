@@ -653,6 +653,15 @@ def select_green_pass(page) -> bool:
     pass_pattern = re.compile(r"ferroviario\s*verde|passe\s*verde", re.IGNORECASE)
 
     try:
+        body_text = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
+    except Exception:
+        body_text = ""
+
+    if not pass_pattern.search(_normalize_text(body_text)):
+        print("[DESCONTO] Opção de Passe Ferroviário Verde não presente neste ecrã; a prosseguir.")
+        return True
+
+    try:
         selects = page.locator("select")
         for idx in range(selects.count()):
             sel = selects.nth(idx)
@@ -705,12 +714,6 @@ def select_green_pass(page) -> bool:
                         continue
             except Exception:
                 continue
-
-    try:
-        body_snippet = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
-        print(f"[DEBUG DESCONTO ECRÃ] {body_snippet[-700:]}")
-    except Exception:
-        pass
 
     print("[DESCONTO] Não foi possível selecionar Passe Ferroviário Verde.")
     return False
