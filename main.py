@@ -652,9 +652,8 @@ def fill_required_field(page, selectors: list[str], value: str, field_label: str
 def select_green_pass(page) -> bool:
     pass_pattern = re.compile(r"ferroviario\s*verde|passe\s*verde", re.IGNORECASE)
 
-    # 1. Tenta qualquer <select> visível na página que contenha a opção pretendida
     try:
-        selects = page.locator("select:visible")
+        selects = page.locator("select")
         for idx in range(selects.count()):
             sel = selects.nth(idx)
             options = sel.locator("option").all_text_contents()
@@ -667,49 +666,49 @@ def select_green_pass(page) -> bool:
     except Exception as exc:
         print(f"[DESCONTO] Aviso ao inspecionar <select>: {exc}")
 
-    # 2. Tenta triggers de desconto / tarifa (botão, combobox, label ou div clicável)
-    trigger = first_existing(
-        page,
-        [
-            "[role='combobox'][aria-label*='desconto' i]",
-            "[role='combobox'][id*='desconto' i]",
-            "button[aria-label*='desconto' i]",
-            "button:has-text('Desconto')",
-            "button:has-text('Sem desconto')",
-            "label:has-text('Desconto') + *",
-            "label:has-text('Desconto')",
-            "text=/^\\s*Sem\\s+desconto\\s*$/i",
-        ],
-    )
+    trigger_selectors = [
+        "[role='combobox']",
+        "[aria-haspopup='listbox']",
+        "button[aria-label*='desconto' i]",
+        "button[aria-label*='tarifa' i]",
+        "button:has-text('Desconto')",
+        "button:has-text('Sem desconto')",
+        "label:has-text('Desconto')",
+        "label:has-text('Tarifa')",
+    ]
 
-    if trigger is not None and locator_visible(trigger, 2500):
-        try:
-            trigger.scroll_into_view_if_needed(timeout=3000)
-            trigger.click(timeout=4000)
-            page.wait_for_timeout(700)
-
-            # Procura opção visível em listbox / option / lista / texto
-            option_candidates = page.locator(
-                "[role='option']:visible, li:visible, button:visible, div[class*='option']:visible, span:visible"
-            )
-            for idx in range(min(option_candidates.count(), 80)):
-                cand = option_candidates.nth(idx)
-                try:
-                    txt = " ".join((cand.inner_text() or "").split())
-                    if txt and len(txt) < 120 and pass_pattern.search(_normalize_text(txt)):
-                        cand.click(timeout=4000)
-                        print(f"[DESCONTO] Selecionado na lista: {txt}")
-                        return True
-                except Exception:
+    for trig_sel in trigger_selectors:
+        triggers = page.locator(trig_sel)
+        for t_idx in range(min(triggers.count(), 6)):
+            trig = triggers.nth(t_idx)
+            try:
+                if not locator_visible(trig, 600):
                     continue
-        except Exception as exc:
-            print(f"[DESCONTO] Falha ao abrir/selecionar desconto: {exc}")
+                trig.scroll_into_view_if_needed(timeout=3000)
+                trig.click(timeout=4000)
+                page.wait_for_timeout(700)
 
-    # 3. Diagnóstico rápido para ver controlos e opções disponíveis em /compra-online
+                option_candidates = page.locator(
+                    "[role='option'], [role='menuitem'], [role='radio'], li, button, div, span"
+                )
+                for c_idx in range(min(option_candidates.count(), 120)):
+                    cand = option_candidates.nth(c_idx)
+                    try:
+                        if not locator_visible(cand, 300):
+                            continue
+                        txt = " ".join((cand.inner_text() or "").split())
+                        if txt and len(txt) < 140 and pass_pattern.search(_normalize_text(txt)):
+                            cand.click(timeout=4000)
+                            print(f"[DESCONTO] Selecionado na lista: {txt}")
+                            return True
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+
     try:
-        select_options = page.locator("select option").all_text_contents()
-        clean_opts = [" ".join(o.split()) for o in select_options if o.strip()]
-        print(f"[DEBUG DESCONTO] Opções <select>: {clean_opts[:15]}")
+        body_snippet = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
+        print(f"[DEBUG DESCONTO ECRÃ] {body_snippet[-700:]}")
     except Exception:
         pass
 
