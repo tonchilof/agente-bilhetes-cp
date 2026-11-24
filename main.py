@@ -1385,7 +1385,7 @@ def attempt_ticket_purchase(
                                 break
                         except Exception:
                             continue
-                            
+
             if not id_filled:
                 try:
                     visible_inputs = page.locator("input:visible")
@@ -1402,8 +1402,38 @@ def attempt_ticket_purchase(
                     pass
 
             if not id_filled:
-                
                 return False, "Não foi possível preencher o documento de identificação.", None
+
+            discount_selected = False
+            discount_triggers = [
+                page.locator("text=/^\\s*Inteiro\\s*$/i").last,
+                page.locator("button:has-text('Desconto'), [role='combobox'][aria-label*='desconto' i]").first,
+            ]
+            for d_trig in discount_triggers:
+                try:
+                    if d_trig.count() > 0 and locator_visible(d_trig, 1000):
+                        d_trig.scroll_into_view_if_needed(timeout=3000)
+                        d_trig.click(timeout=4000)
+                        page.wait_for_timeout(700)
+                        pass_opt = page.locator(
+                            "[role='option']:visible, li:visible, button:visible, div:visible, span:visible"
+                        ).filter(has_text=re.compile(r"ferroviario\s*verde|passe\s*verde", re.IGNORECASE))
+                        for p_idx in range(pass_opt.count()):
+                            cand = pass_opt.nth(p_idx)
+                            txt = " ".join((cand.inner_text() or "").split())
+                            if txt and len(txt) < 120 and "ferroviario" in _normalize_text(txt):
+                                cand.click(timeout=4000)
+                                page.wait_for_timeout(600)
+                                print(f"[DESCONTO] Selecionado: {txt}")
+                                discount_selected = True
+                                break
+                    if discount_selected:
+                        break
+                except Exception as exc:
+                    print(f"[AVISO DESCONTO] Tentativa de abrir desconto falhou: {exc}")
+
+            if not discount_selected and not select_green_pass(page):
+                return False, "Não foi possível selecionar Passe Ferroviário Verde.", None
 
             # Seleciona "Passe Ferroviário Verde" a partir do seletor de Desconto (ex: "Inteiro")
             discount_selected = False
