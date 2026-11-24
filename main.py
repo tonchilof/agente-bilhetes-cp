@@ -273,6 +273,13 @@ def _normalize_text(value: str) -> str:
     return re.sub(r"\s+", " ", without_accents).strip().lower()
 
 
+def _normalize_text(value: str) -> str:
+    """Remove acentos e normaliza espaços/minúsculas para comparação flexível."""
+    nfkd = unicodedata.normalize("NFKD", value or "")
+    without_accents = "".join(ch for ch in nfkd if not unicodedata.combining(ch))
+    return re.sub(r"\s+", " ", without_accents).strip().lower()
+
+
 def fill_station_input(page, input_locator: Locator, station_name: str) -> bool:
     """Preenche a estação e seleciona uma sugestão do autocomplete ignorando acentos."""
     if input_locator.count() == 0:
@@ -287,27 +294,31 @@ def fill_station_input(page, input_locator: Locator, station_name: str) -> bool:
         "[class*='dropdown'] li",
     ]
     target_norm = _normalize_text(station_name)
-    # Usa a palavra principal (ex: "campanha" de "Porto Campanha") para não falhar por hífens/acentos
     keywords = [w for w in target_norm.replace("-", " ").split() if len(w) >= 3]
     primary_token = keywords[-1] if keywords else target_norm
 
     for attempt in range(1, 4):
         try:
             input_locator.click(timeout=5000)
-            input_locator.fill("")
-            input_locator.press_sequentially(station_name, delay=75)
-            page.wait_for_timeout(1400)
+            page.keyboard.press("Control+A")
+            page.keyboard.press("Backspace")
+            page.wait_for_timeout(200)
+            input_locator.press_sequentially(station_name, delay=90)
+            page.wait_for_timeout(1800)
 
             all_suggestions = page.locator(", ".join(suggestion_selectors))
             total = min(all_suggestions.count(), 40)
 
             best_suggestion = None
+            seen_texts: list[str] = []
             for idx in range(total):
                 cand = all_suggestions.nth(idx)
                 try:
                     if not locator_visible(cand, 400):
                         continue
                     cand_text = " ".join((cand.inner_text() or "").split())
+                    if cand_text:
+                        seen_texts.append(cand_text)
                     cand_norm = _normalize_text(cand_text)
                     if target_norm in cand_norm or (primary_token and primary_token in cand_norm):
                         best_suggestion = cand
@@ -316,12 +327,16 @@ def fill_station_input(page, input_locator: Locator, station_name: str) -> bool:
                     continue
 
             if best_suggestion is not None:
+                chosen_label = " ".join((best_suggestion.inner_text() or "").split())
                 best_suggestion.click(timeout=5000)
                 page.wait_for_timeout(400)
-                print(f"[FORM] Estação selecionada para '{station_name}': {best_suggestion.inner_text().strip()}")
+                print(f"[FORM] Estação selecionada para '{station_name}': {chosen_label}")
                 return True
 
-            print(f"[AVISO FORM] Tentativa {attempt}: sugestão não encontrada para '{station_name}'.")
+            print(
+                f"[AVISO FORM] Tentativa {attempt}: sugestão não encontrada para '{station_name}'. "
+                f"Sugestões visíveis: {seen_texts[:6]}"
+            )
         except Exception as exc:
             print(f"[AVISO FORM] Tentativa {attempt} para '{station_name}': {exc}")
 
