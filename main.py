@@ -18,6 +18,7 @@ from playwright.sync_api import (
     TimeoutError as PlaywrightTimeoutError,
     sync_playwright,
 )
+import unicodedata
 
 LISBON_TZ = ZoneInfo("Europe/Lisbon")
 CP_URL = "https://cp.pt/pt/"
@@ -265,8 +266,15 @@ def dismiss_blocking_modal(page) -> bool:
     return True
 
 
+def _normalize_text(value: str) -> str:
+    """Remove acentos e normaliza espaços/minúsculas para comparação flexível."""
+    nfkd = unicodedata.normalize("NFKD", value or "")
+    without_accents = "".join(ch for ch in nfkd if not unicodedata.combining(ch))
+    return re.sub(r"\s+", " ", without_accents).strip().lower()
+
+
 def fill_station_input(page, input_locator: Locator, station_name: str) -> bool:
-    """Preenche a estação e seleciona uma sugestão do autocomplete."""
+    """Preenche a estação e seleciona uma sugestão do autocomplete ignorando acentos."""
     if input_locator.count() == 0:
         print(f"[FORM] Campo da estação não encontrado: {station_name}")
         return False
@@ -278,25 +286,40 @@ def fill_station_input(page, input_locator: Locator, station_name: str) -> bool:
         "[class*='suggestion']",
         "[class*='dropdown'] li",
     ]
+    target_norm = _normalize_text(station_name)
+    # Usa a palavra principal (ex: "campanha" de "Porto Campanha") para não falhar por hífens/acentos
+    keywords = [w for w in target_norm.replace("-", " ").split() if len(w) >= 3]
+    primary_token = keywords[-1] if keywords else target_norm
 
     for attempt in range(1, 4):
         try:
             input_locator.click(timeout=5000)
             input_locator.fill("")
             input_locator.press_sequentially(station_name, delay=75)
-            page.wait_for_timeout(1300)
+            page.wait_for_timeout(1400)
 
-            suggestions = page.locator(", ".join(suggestion_selectors)).filter(
-                has_text=re.compile(re.escape(station_name), re.IGNORECASE)
-            )
+            all_suggestions = page.locator(", ".join(suggestion_selectors))
+            total = min(all_suggestions.count(), 40)
 
-            if suggestions.count() > 0:
-                suggestion = suggestions.first
-                if locator_visible(suggestion, 2500):
-                    suggestion.click(timeout=5000)
-                    page.wait_for_timeout(400)
-                    print(f"[FORM] Estação selecionada: {station_name}")
-                    return True
+            best_suggestion = None
+            for idx in range(total):
+                cand = all_suggestions.nth(idx)
+                try:
+                    if not locator_visible(cand, 400):
+                        continue
+                    cand_text = " ".join((cand.inner_text() or "").split())
+                    cand_norm = _normalize_text(cand_text)
+                    if target_norm in cand_norm or (primary_token and primary_token in cand_norm):
+                        best_suggestion = cand
+                        break
+                except Exception:
+                    continue
+
+            if best_suggestion is not None:
+                best_suggestion.click(timeout=5000)
+                page.wait_for_timeout(400)
+                print(f"[FORM] Estação selecionada para '{station_name}': {best_suggestion.inner_text().strip()}")
+                return True
 
             print(f"[AVISO FORM] Tentativa {attempt}: sugestão não encontrada para '{station_name}'.")
         except Exception as exc:
