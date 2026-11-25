@@ -1696,6 +1696,8 @@ def attempt_ticket_purchase(
             if advance_passenger_btn is None:
                 return False, "Botão 'Avançar' do formulário de passageiros não encontrado.", None
 
+            before_text = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
+            before_url = page.url
 
             try:
                 advance_passenger_btn.scroll_into_view_if_needed(timeout=3000)
@@ -1725,27 +1727,56 @@ def attempt_ticket_purchase(
                 print(f"[DEBUG AVANÇAR TIMEOUT] {debug_txt[-900:]}")
                 return False, "Timeout ao clicar em 'Avançar' no formulário de passageiros.", None
 
-            # Aguardar conclusão de "Por favor aguarde um momento..." e transição de ecrã
             transitioned = False
-            deadline = time.monotonic() + 20
+            deadline = time.monotonic() + 25
+            last_curr_text = before_text
+
             while time.monotonic() < deadline:
-                curr_text = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
+                try:
+                    curr_text = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
+                except Exception:
+                    page.wait_for_timeout(600)
+                    continue
+
+                last_curr_text = curr_text
+
                 if "Não foi possível iniciar o processo de compra" in curr_text:
                     return False, "A CP rejeitou a validação do passe ou não existem lugares elegíveis.", None
+
+                still_passenger_form = (
+                    "Dados dos passageiros" in curr_text
+                    and re.search(r"informa[çc][aã]o\s+adicional", curr_text, re.IGNORECASE) is not None
+                )
+                reached_next_step = (
+                    re.search(
+                        r"\b2\s+Pagamento\b|Escolha\s+o\s+lugar|Sele[çc][aã]o\s+de\s+lugar|Resumo\s+da\s+compra|Total\s+a\s+pagar",
+                        curr_text,
+                        re.IGNORECASE,
+                    )
+                    is not None
+                )
+
                 if "Por favor aguarde um momento" not in curr_text and (
-                    "Dados dos passageiros" not in curr_text
-                    or re.search(r"\b2\s+Pagamento\b|Total|A\s+pagar|Carruagem|Lugar", curr_text, re.IGNORECASE)
+                    reached_next_step
+                    or (not still_passenger_form and curr_text != before_text)
+                    or page.url != before_url
                 ):
                     transitioned = True
                     break
+
                 page.wait_for_timeout(700)
 
             if not transitioned:
-                curr_text = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
-                print(f"[DEBUG SEM TRANSIÇÃO] {curr_text[-900:]}")
-                return False, "O formulário de passageiros não avançou após clicar em 'Avançar'.", None
-                
-           
+                print(f"[DEBUG ERRO AVANÇAR] URL={page.url} | {last_curr_text[-900:]}")
+                return (
+                    False,
+                    "O formulário de passageiros não avançou após clicar em 'Avançar' "
+                    "(verificar validação do passe/campos no ecrã).",
+                    None,
+                )
+
+
+
             # -----------------------------------------------------------------
             # E. Carruagem/lugar e resumo
             # -----------------------------------------------------------------
