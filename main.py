@@ -1350,19 +1350,25 @@ def attempt_ticket_purchase(
                     page.wait_for_timeout(600)
                     doc_option = None
                     for opt_regex in (
-                        re.compile(r"cart[aã]o\s+de\s+cidad[aã]o|cc", re.IGNORECASE),
-                        re.compile(r"passaporte|outro|documento", re.IGNORECASE),
+                        re.compile(r"^\s*Cart[aã]o\s+de\s+Cidad[aã]o\s*$", re.IGNORECASE),
+                        re.compile(r"^\s*(?:Passaporte|T[ií]tulo\s+de\s+Resid[eê]ncia|Outro)\s*$", re.IGNORECASE),
                     ):
-                        cand = page.locator(
+                        cands = page.locator(
                             "[role='option']:visible, li:visible, button:visible, div:visible, span:visible"
-                        ).filter(has_text=opt_regex).last
-                        if cand.count() > 0 and locator_visible(cand, 600):
-                            doc_option = cand
+                        ).filter(has_text=opt_regex)
+                        for d_idx in range(cands.count()):
+                            cand = cands.nth(d_idx)
+                            txt = " ".join((cand.inner_text() or "").split())
+                            if txt and len(txt) <= 45 and opt_regex.match(txt) and locator_visible(cand, 600):
+                                doc_option = cand
+                                break
+                        if doc_option is not None:
                             break
                     if doc_option is not None:
+                        doc_label = " ".join((doc_option.inner_text() or "").split())
                         doc_option.click(timeout=4000)
                         page.wait_for_timeout(500)
-                        print(f"[DOC] Tipo de documento selecionado: {doc_option.inner_text().strip()}")
+                        print(f"[DOC] Tipo de documento selecionado: {doc_label}")
                 except Exception as exc:
                     print(f"[AVISO DOC] Não foi possível selecionar o tipo de documento: {exc}")
 
@@ -1387,36 +1393,51 @@ def attempt_ticket_purchase(
 
             discount_selected = False
             try:
-                inteiro_el = page.locator("text=/^\\s*Inteiro\\s*$/i").last
-                if inteiro_el.count() > 0 and locator_visible(inteiro_el, 1500):
-                    inteiro_el.scroll_into_view_if_needed(timeout=3000)
-                    inteiro_el.click(timeout=4000, force=True)
-                    page.wait_for_timeout(800)
+                discount_triggers = [
+                    page.locator("[role='combobox']:visible").filter(
+                        has_text=re.compile(r"inteiro|desconto|tarifa|verde", re.IGNORECASE)
+                    ),
+                    page.locator("button:visible").filter(
+                        has_text=re.compile(r"inteiro|desconto|tarifa|verde", re.IGNORECASE)
+                    ),
+                    page.locator("text=/^\\s*Inteiro\\s*$/i"),
+                ]
 
-                    options_Dump = []
-                    cands = page.locator(
-                        "[role='option']:visible, [role='menuitem']:visible, li:visible, button:visible, div:visible, span:visible"
-                    )
-                    for c_idx in range(min(cands.count(), 150)):
-                        cand = cands.nth(c_idx)
-                        try:
-                            txt = " ".join((cand.inner_text() or "").split())
-                            if not txt or len(txt) > 100:
-                                continue
-                            norm_txt = _normalize_text(txt)
-                            if any(k in norm_txt for k in ("inteiro", "verde", "jovem", "senior", "crianca", "desconto")):
-                                options_Dump.append(txt)
-                            if "ferroviario" in norm_txt and "verde" in norm_txt:
-                                cand.click(timeout=4000, force=True)
-                                page.wait_for_timeout(600)
-                                print(f"[DESCONTO] Selecionado: {txt}")
-                                discount_selected = True
-                                break
-                        except Exception:
+                for trig_group in discount_triggers:
+                    for t_idx in range(min(trig_group.count(), 4)):
+                        trig = trig_group.nth(t_idx)
+                        if not locator_visible(trig, 800):
                             continue
+                        trig.scroll_into_view_if_needed(timeout=3000)
+                        trig.click(timeout=4000, force=True)
+                        page.wait_for_timeout(700)
 
-                    if not discount_selected:
-                        print(f"[DEBUG OPÇÕES DESCONTO] {list(dict.fromkeys(options_Dump))[:15]}")
+                        cands = page.locator(
+                            "[role='option']:visible, [role='menuitem']:visible, li:visible, button:visible, div:visible, span:visible"
+                        )
+                        for c_idx in range(min(cands.count(), 160)):
+                            cand = cands.nth(c_idx)
+                            try:
+                                txt = " ".join((cand.inner_text() or "").split())
+                                if not txt or len(txt) > 100:
+                                    continue
+                                norm_txt = _normalize_text(txt)
+                                if "ferroviario" in norm_txt and "verde" in norm_txt:
+                                    cand.click(timeout=4000, force=True)
+                                    page.wait_for_timeout(700)
+                                    print(f"[DESCONTO] Selecionado: {txt}")
+                                    discount_selected = True
+                                    break
+                            except Exception:
+                                continue
+
+                        if discount_selected:
+                            break
+                    if discount_selected:
+                        break
+
+                if not discount_selected:
+                    discount_selected = select_green_pass(page)
             except Exception as exc:
                 print(f"[AVISO DESCONTO] Erro ao abrir/selecionar desconto: {exc}")
 
