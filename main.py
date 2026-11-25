@@ -352,15 +352,9 @@ def fill_station_input(page, input_locator: Locator, station_name: str) -> bool:
 
 
 def find_specific_train_card(page, trip_time: str, timeout_seconds: int = 25) -> tuple[Locator, str] | None:
-    """Encontra o controlo 'Selecionar ida' pertencente ao IC da hora pedida.
-
-    Não depende de localizar a hora como um nó de texto isolado: percorre primeiro
-    os controlos de seleção e lê os respetivos ancestrais. Isto é mais robusto
-    quando a CP altera spans, componentes web, estrutura do cartão ou Shadow DOM.
-    A pesquisa é repetida durante alguns segundos para acomodar resultados
-    carregados assincronamente.
-    """
+    """Encontra o controlo 'Selecionar ida' pertencente ao IC da hora pedida."""
     time_pattern = re.compile(rf"(?<!\d){re.escape(trip_time)}(?!\d)")
+    departure_time_pattern = re.compile(rf"partida\s+às\s+{re.escape(trip_time)}(?!\d)", re.IGNORECASE)
     select_pattern = re.compile(r"Selecionar\s+ida", re.IGNORECASE)
     contexts: list[tuple[str, Any]] = [("página principal", page)]
 
@@ -372,8 +366,6 @@ def find_specific_train_card(page, trip_time: str, timeout_seconds: int = 25) ->
     except Exception:
         pass
 
-    # Percorre elementos ancestrais diretamente no browser. A avaliação começa
-    # no próprio botão/link e não utiliza XPath (que não atravessa Shadow DOM).
     ancestor_script = r"""(element, requestedTime) => {
         const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
         const escaped = requestedTime.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -383,6 +375,11 @@ def find_specific_train_card(page, trip_time: str, timeout_seconds: int = 25) ->
         let best = null;
         for (let level = 0; current && level < 14; level += 1, current = current.parentElement) {
             const text = normalize(current.innerText || current.textContent || '');
+            const selectMatches = text.match(/selecionar\s+ida/gi) || [];
+            const departureMatches = text.match(/partida\s+às/gi) || [];
+            if (selectMatches.length > 1 || departureMatches.length > 1) {
+                continue;
+            }
             if (text.length >= 20 && text.length <= 5000 && timeRegex.test(text) && serviceRegex.test(text)) {
                 if (best === null || text.length < best.text.length) {
                     best = { text, level };
@@ -400,8 +397,6 @@ def find_specific_train_card(page, trip_time: str, timeout_seconds: int = 25) ->
         last_diagnostics = []
 
         for context_name, context in contexts:
-            # Primeiro procura os controlos reais. Os seletores CSS do Playwright
-            # atravessam open Shadow DOM e também abrangem botões e links.
             try:
                 controls = context.locator(
                     "button:visible, a:visible, [role='button']:visible"
@@ -429,6 +424,8 @@ def find_specific_train_card(page, trip_time: str, timeout_seconds: int = 25) ->
                         continue
                     if not re.search(r"Intercidades|\bIC\b", card_text, re.IGNORECASE):
                         continue
+                    if "partida às" in card_text.lower() and not departure_time_pattern.search(card_text):
+                        continue
 
                     print(
                         f"[COMBOIO] Cartão Intercidades das {trip_time} encontrado em "
@@ -436,9 +433,6 @@ def find_specific_train_card(page, trip_time: str, timeout_seconds: int = 25) ->
                     )
                     return control, card_text
 
-            # Fallback: em versões em que o controlo não é um button/link/role,
-            # parte do texto da hora e sobe a árvore com evaluate (compatível com
-            # elementos dentro de Shadow DOM aberto).
             try:
                 time_nodes = context.get_by_text(time_pattern)
                 node_count = min(time_nodes.count(), 30)
@@ -461,8 +455,6 @@ def find_specific_train_card(page, trip_time: str, timeout_seconds: int = 25) ->
                     if not re.search(r"Intercidades|\bIC\b", card_text, re.IGNORECASE):
                         continue
 
-                    # Encontrar o botão de seleção dentro do mesmo cartão através
-                    # do texto acessível do botão e validar novamente o ancestral.
                     buttons = context.locator(
                         "button:visible, a:visible, [role='button']:visible"
                     ).filter(has_text=select_pattern)
@@ -475,13 +467,14 @@ def find_specific_train_card(page, trip_time: str, timeout_seconds: int = 25) ->
                                 if time_pattern.search(button_card) and re.search(
                                     r"Intercidades|\bIC\b", button_card, re.IGNORECASE
                                 ):
+                                    if "partida às" in button_card.lower() and not departure_time_pattern.search(button_card):
+                                        continue
                                     return button, button_card
                         except Exception:
                             continue
                 except Exception:
                     continue
 
-            # Diagnóstico limitado para não despejar toda a página no log.
             try:
                 body_text = " ".join(context.locator("body").inner_text(timeout=1200).split())
                 if body_text:
@@ -1442,6 +1435,10 @@ def attempt_ticket_purchase(
                 return False, "O cartão localizado não foi identificado como Intercidades.", None
             if not re.search(rf"(?<!\d){re.escape(trip_time)}(?!\d)", card_text):
                 return False, "A hora do cartão localizado não corresponde à hora pedida.", None
+            if "partida às" in card_text.lower() and not re.search(
+                rf"partida\s+às\s+{re.escape(trip_time)}(?!\d)", card_text, re.IGNORECASE
+            ):
+                return False, f"A partida do cartão localizado não corresponde às {trip_time}.", None
             if not locator_visible(select_outbound, 4000):
                 return False, "Botão 'Selecionar ida' não está visível no comboio pretendido.", None
 
@@ -1748,48 +1745,7 @@ def attempt_ticket_purchase(
                 print(f"[DEBUG SEM TRANSIÇÃO] {curr_text[-900:]}")
                 return False, "O formulário de passageiros não avançou após clicar em 'Avançar'.", None
                 
-            
-            # Garantir clique no botão 'Avançar' do formulário de passageiros
-            advance_passenger_btn = find_visible_button(page, ["Avançar", "Continuar", "Seguinte"])
-            if advance_passenger_btn is None:
-                return False, "Botão 'Avançar' do formulário de passageiros não encontrado.", None
-            
-
-            try:
-                advance_passenger_btn.scroll_into_view_if_needed(timeout=3000)
-                if not advance_passenger_btn.is_enabled(timeout=8000):
-                    debug_txt = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
-                    print(f"[DEBUG AVANÇAR DISABLED] {debug_txt[-900:]}")
-                    return False, "Botão 'Avançar' permaneceu desativado após preencher os dados do passageiro.", None
-
-                print("[PASSAGEIROS] A clicar em 'Avançar' para prosseguir.")
-                advance_passenger_btn.click(timeout=8000)
-                page.wait_for_timeout(800)
-            except PlaywrightTimeoutError:
-                debug_txt = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
-                print(f"[DEBUG AVANÇAR TIMEOUT] {debug_txt[-900:]}")
-                return False, "Timeout ao clicar em 'Avançar' no formulário de passageiros.", None
-
-            # Aguardar conclusão de "Por favor aguarde um momento..." e transição de ecrã
-            transitioned = False
-            deadline = time.monotonic() + 20
-            while time.monotonic() < deadline:
-                curr_text = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
-                if "Não foi possível iniciar o processo de compra" in curr_text:
-                    return False, "A CP rejeitou a validação do passe ou não existem lugares elegíveis.", None
-                if "Por favor aguarde um momento" not in curr_text and (
-                    "Dados dos passageiros" not in curr_text
-                    or re.search(r"\b2\s+Pagamento\b|Total|A\s+pagar|Carruagem|Lugar", curr_text, re.IGNORECASE)
-                ):
-                    transitioned = True
-                    break
-                page.wait_for_timeout(700)
-
-            if not transitioned:
-                curr_text = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
-                print(f"[DEBUG SEM TRANSIÇÃO] {curr_text[-900:]}")
-                return False, "O formulário de passageiros não avançou após clicar em 'Avançar'.", None
-
+           
             # -----------------------------------------------------------------
             # E. Carruagem/lugar e resumo
             # -----------------------------------------------------------------
