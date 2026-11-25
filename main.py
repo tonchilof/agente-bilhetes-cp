@@ -655,16 +655,28 @@ def find_visible_button(page, labels: list[str]) -> Locator | None:
 
 
 def fill_required_field(page, selectors: list[str], value: str, field_label: str) -> bool:
+    """Preenche o primeiro campo visível e dispara eventos de validação."""
     locator = first_existing(page, selectors)
-    if locator is None or not locator_visible(locator, 3500):
-        print(f"[PASSAGEIRO] Campo obrigatório não encontrado: {field_label}")
+    if locator is None:
+        print(f"[AVISO FORM] Campo '{field_label}' não encontrado pelos seletores.")
         return False
 
     try:
+        locator.scroll_into_view_if_needed(timeout=4000)
+        locator.click(timeout=5000)
         locator.fill(value, timeout=5000)
+        locator.dispatch_event("input")
+        locator.dispatch_event("change")
+        locator.press("Tab")
+        page.wait_for_timeout(250)
+        actual = (locator.input_value() or "").strip()
+        if not actual:
+            print(f"[AVISO FORM] Campo '{field_label}' continuou vazio após preenchimento.")
+            return False
+        print(f"[PASSAGEIRO] {field_label} preenchido e validado.")
         return True
     except Exception as exc:
-        print(f"[PASSAGEIRO] Não foi possível preencher {field_label}: {exc}")
+        print(f"[AVISO FORM] Falha ao preencher '{field_label}': {exc}")
         return False
 
 
@@ -1527,6 +1539,8 @@ def attempt_ticket_purchase(
                 name_input.scroll_into_view_if_needed(timeout=3000)
                 name_input.click(timeout=4000)
                 name_input.fill(clean_name, timeout=5000)
+                name_input.dispatch_event("input")
+                name_input.dispatch_event("change")
                 name_input.press("Tab")
                 page.wait_for_timeout(300)
                 actual_name = " ".join((name_input.input_value() or "").split()).strip()
@@ -1649,6 +1663,10 @@ def attempt_ticket_purchase(
                 try:
                     extra_info.scroll_into_view_if_needed(timeout=3000)
                     extra_info.fill(pass_code, timeout=5000)
+                    extra_info.dispatch_event("input")
+                    extra_info.dispatch_event("change")
+                    extra_info.press("Tab")
+                    page.wait_for_timeout(300)
                     print("[PASSE] Campo 'Informação adicional' preenchido com CP_PASS_CODE.")
                 except Exception as exc:
                     return False, f"Não foi possível preencher o código do passe: {exc}", None
@@ -1670,6 +1688,28 @@ def attempt_ticket_purchase(
 
             try:
                 advance_passenger_btn.scroll_into_view_if_needed(timeout=3000)
+
+                try:
+                advance_passenger_btn.scroll_into_view_if_needed(timeout=3000)
+                if not advance_passenger_btn.is_enabled(timeout=8000):
+                    vis_inputs = page.locator("input:visible")
+                    states = []
+                    for i in range(vis_inputs.count()):
+                        el = vis_inputs.nth(i)
+                        el_id = el.get_attribute("id") or el.get_attribute("name") or f"#{i}"
+                        el_type = el.get_attribute("type") or "text"
+                        has_val = bool((el.input_value() or "").strip())
+                        invalid = el.get_attribute("aria-invalid") or ""
+                        req = el.get_attribute("required")
+                        states.append(
+                            f"{el_id}(type={el_type},filled={has_val},req={req is not None},invalid={invalid})"
+                        )
+                    print(f"[DEBUG INPUTS PASSAGEIRO] {', '.join(states)}")
+                    debug_txt = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
+                    print(f"[DEBUG AVANÇAR DISABLED] {debug_txt[-900:]}")
+                    return False, "Botão 'Avançar' permaneceu desativado após preencher os dados do passageiro.", None
+
+                
                 if not advance_passenger_btn.is_enabled(timeout=8000):
                     debug_txt = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
                     print(f"[DEBUG AVANÇAR DISABLED] {debug_txt[-900:]}")
