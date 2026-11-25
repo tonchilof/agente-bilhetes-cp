@@ -819,6 +819,85 @@ def find_additional_info_input(page) -> Locator | None:
 
     return None
 
+
+def find_name_input(page) -> Locator | None:
+    """Localiza o <input> associado a 'Nome e apelido' por atributos, rótulo ou proximidade."""
+    name_selectors = [
+        "input[name*='nome' i]",
+        "input[id*='nome' i]",
+        "input[aria-label*='nome' i]",
+        "input[placeholder*='Nome' i]",
+    ]
+    direct = first_existing(page, name_selectors)
+    if direct is not None and locator_visible(direct, 1000):
+        return direct
+
+    label_pattern = re.compile(r"nome\s+e\s+apelido|^\s*nome\s*\*?\s*$", re.IGNORECASE)
+    label_els = page.locator("label, span, div, p").filter(has_text=label_pattern)
+    for idx in range(min(label_els.count(), 10)):
+        lbl = label_els.nth(idx)
+        try:
+            if not locator_visible(lbl, 500):
+                continue
+            for_attr = (lbl.get_attribute("for") or "").strip()
+            if for_attr:
+                by_id = page.locator(f"[id='{for_attr}']").first
+                if by_id.count() > 0 and locator_visible(by_id, 600):
+                    return by_id
+
+            lbl_id = (lbl.get_attribute("id") or "").strip()
+            if lbl_id:
+                by_labelledby = page.locator(f"[aria-labelledby~='{lbl_id}']").first
+                if by_labelledby.count() > 0 and locator_visible(by_labelledby, 600):
+                    return by_labelledby
+
+            container = lbl
+            for _ in range(5):
+                container = container.locator("..")
+                if container.count() == 0:
+                    break
+                inp = container.locator(
+                    "input:visible:not([type='hidden']):not([type='checkbox']):not([type='radio'])"
+                ).first
+                if inp.count() > 0 and locator_visible(inp, 500):
+                    return inp
+        except Exception:
+            continue
+
+    text_node = page.get_by_text(re.compile(r"nome\s+e\s+apelido", re.IGNORECASE)).first
+    try:
+        if text_node.count() > 0 and locator_visible(text_node, 800):
+            t_box = text_node.bounding_box()
+            if t_box:
+                t_cx = t_box["x"] + t_box["width"] / 2
+                t_cy = t_box["y"] + t_box["height"] / 2
+                inputs = page.locator(
+                    "input:visible:not([type='hidden']):not([type='checkbox']):not([type='radio'])"
+                )
+                best_inp = None
+                best_dist = float("inf")
+                for i in range(inputs.count()):
+                    cand = inputs.nth(i)
+                    box = cand.bounding_box()
+                    if not box:
+                        continue
+                    c_cx = box["x"] + box["width"] / 2
+                    c_cy = box["y"] + box["height"] / 2
+                    same_row_right = abs(c_cy - t_cy) < 60 and c_cx >= t_box["x"]
+                    below_near = 0 <= (c_cy - t_cy) < 140 and abs(c_cx - t_cx) < 350
+                    if same_row_right or below_near:
+                        dist = ((c_cx - t_cx) ** 2 + (c_cy - t_cy) ** 2) ** 0.5
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_inp = cand
+                if best_inp is not None:
+                    return best_inp
+    except Exception:
+        pass
+
+    return None
+
+
 def set_checkbox_for_statement(page, pattern: re.Pattern[str], description: str) -> bool:
     """Marca e verifica uma declaração específica, sem tocar em opções de marketing."""
     checkbox = page.get_by_role("checkbox", name=pattern).last
@@ -1428,8 +1507,36 @@ def attempt_ticket_purchase(
                 )
 
             print("[PASSAGEIROS] Formulário detetado.")
-            if not fill_required_field(page, name_selectors, passenger_name, "Nome"):
-                return False, "Não foi possível preencher o nome do passageiro.", None
+            clean_name = " ".join(passenger_name.split()).strip()
+            if len(clean_name.split()) < 2:
+                print(
+                    "[AVISO PASSAGEIRO] PASSENGER_NAME deve conter pelo menos primeiro e último nome "
+                    f"(valor atual: '{clean_name}')."
+                )
+            if len(clean_name) > 50:
+                print(
+                    f"[AVISO PASSAGEIRO] PASSENGER_NAME tem {len(clean_name)} caracteres "
+                    "(máximo recomendado: 50)."
+                )
+
+            name_input = find_name_input(page)
+            if name_input is None:
+                return False, "Não foi possível localizar o campo 'Nome e apelido' do passageiro.", None
+
+            try:
+                name_input.scroll_into_view_if_needed(timeout=3000)
+                name_input.click(timeout=4000)
+                name_input.fill(clean_name, timeout=5000)
+                name_input.press("Tab")
+                page.wait_for_timeout(300)
+                actual_name = " ".join((name_input.input_value() or "").split()).strip()
+                if not actual_name:
+                    return False, "O campo 'Nome e apelido' continuou vazio após preenchimento.", None
+                print(f"[PASSAGEIRO] Nome preenchido e validado: '{actual_name}'.")
+            except Exception as exc:
+                return False, f"Não foi possível preencher o nome do passageiro: {exc}", None
+
+            
             if not fill_required_field(page, email_selectors, passenger_email, "E-mail"):
                 return False, "Não foi possível preencher o e-mail do passageiro.", None
 
