@@ -1722,12 +1722,32 @@ def attempt_ticket_purchase(
 
                 print("[PASSAGEIROS] A clicar em 'Avançar' para prosseguir.")
                 advance_passenger_btn.click(timeout=8000)
+                page.wait_for_timeout(800)
             except PlaywrightTimeoutError:
                 debug_txt = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
                 print(f"[DEBUG AVANÇAR TIMEOUT] {debug_txt[-900:]}")
                 return False, "Timeout ao clicar em 'Avançar' no formulário de passageiros.", None
-                
 
+            # Aguardar conclusão de "Por favor aguarde um momento..." e transição de ecrã
+            transitioned = False
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                curr_text = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
+                if "Não foi possível iniciar o processo de compra" in curr_text:
+                    return False, "A CP rejeitou a validação do passe ou não existem lugares elegíveis.", None
+                if "Por favor aguarde um momento" not in curr_text and (
+                    "Dados dos passageiros" not in curr_text
+                    or re.search(r"\b2\s+Pagamento\b|Total|A\s+pagar|Carruagem|Lugar", curr_text, re.IGNORECASE)
+                ):
+                    transitioned = True
+                    break
+                page.wait_for_timeout(700)
+
+            if not transitioned:
+                curr_text = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
+                print(f"[DEBUG SEM TRANSIÇÃO] {curr_text[-900:]}")
+                return False, "O formulário de passageiros não avançou após clicar em 'Avançar'.", None
+                
             
             # Garantir clique no botão 'Avançar' do formulário de passageiros
             advance_passenger_btn = find_visible_button(page, ["Avançar", "Continuar", "Seguinte"])
@@ -1744,24 +1764,26 @@ def attempt_ticket_purchase(
 
                 print("[PASSAGEIROS] A clicar em 'Avançar' para prosseguir.")
                 advance_passenger_btn.click(timeout=8000)
+                page.wait_for_timeout(800)
             except PlaywrightTimeoutError:
                 debug_txt = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
                 print(f"[DEBUG AVANÇAR TIMEOUT] {debug_txt[-900:]}")
                 return False, "Timeout ao clicar em 'Avançar' no formulário de passageiros.", None
 
-            # Aguardar transição efetiva para fora do formulário de passageiros
+            # Aguardar conclusão de "Por favor aguarde um momento..." e transição de ecrã
             transitioned = False
-            deadline = time.monotonic() + 15
+            deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
-                page.wait_for_timeout(600)
                 curr_text = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
                 if "Não foi possível iniciar o processo de compra" in curr_text:
                     return False, "A CP rejeitou a validação do passe ou não existem lugares elegíveis.", None
-                if "Dados dos passageiros" not in curr_text or re.search(
-                    r"Total|A\s+pagar|Pagamento|Carruagem|Lugar", curr_text, re.IGNORECASE
+                if "Por favor aguarde um momento" not in curr_text and (
+                    "Dados dos passageiros" not in curr_text
+                    or re.search(r"\b2\s+Pagamento\b|Total|A\s+pagar|Carruagem|Lugar", curr_text, re.IGNORECASE)
                 ):
                     transitioned = True
                     break
+                page.wait_for_timeout(700)
 
             if not transitioned:
                 curr_text = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
