@@ -1478,52 +1478,46 @@ def attempt_ticket_purchase(
                 except Exception as exc:
                     return False, f"Não foi possível preencher o código do passe: {exc}", None
 
-            if not extra_filled:
-                try:
-                    add_label = page.locator("text=/Informa[çc][aã]o adicional/i").first
-                    if add_label.count() > 0 and locator_visible(add_label, 1000):
-                        for rel_sel in (
-                            "xpath=following::input[1]",
-                            "xpath=../following::input[1]",
-                            "xpath=../../following::input[1]",
-                        ):
-                            cand = add_label.locator(rel_sel).first
-                            if cand.count() > 0 and locator_visible(cand, 800):
-                                cand.fill(pass_code, timeout=5000)
-                                extra_filled = True
-                                print("[PASSE] Campo 'Informação adicional' preenchido via rótulo.")
-                                break
-                except Exception as exc:
-                    print(f"[AVISO PASSE] Falha ao localizar 'Informação adicional': {exc}")
-
-            if not extra_filled:
+if not extra_filled:
                 print("[PASSE] Campo do código/número do passe não presente neste ecrã; a prosseguir.")
 
-            continue_button = find_visible_button(page, ["Continuar", "Avançar", "Seguinte"])
-            if continue_button is None:
-                return False, "Botão para validar os dados do passageiro não encontrado.", None
+            # Garantir clique no botão 'Avançar' do formulário de passageiros
+            advance_passenger_btn = find_visible_button(page, ["Avançar", "Continuar", "Seguinte"])
+            if advance_passenger_btn is None:
+                return False, "Botão 'Avançar' do formulário de passageiros não encontrado.", None
 
             try:
-                continue_button.wait_for(state="attached", timeout=5000)
-                if not continue_button.is_enabled(timeout=8000):
+                advance_passenger_btn.scroll_into_view_if_needed(timeout=3000)
+                if not advance_passenger_btn.is_enabled(timeout=8000):
                     debug_txt = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
                     print(f"[DEBUG AVANÇAR DISABLED] {debug_txt[-900:]}")
-                    return False, "Botão 'Avançar' permaneceu desativado no formulário do passageiro.", None
-                continue_button.click(timeout=8000)
+                    return False, "Botão 'Avançar' permaneceu desativado após preencher os dados do passageiro.", None
+
+                print("[PASSAGEIROS] A clicar em 'Avançar' para prosseguir.")
+                advance_passenger_btn.click(timeout=8000)
             except PlaywrightTimeoutError:
                 debug_txt = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
-                print(f"[DEBUG AVANÇAR DISABLED] {debug_txt[-900:]}")
-                return False, "Botão 'Avançar' desativado após timeout no formulário do passageiro.", None
+                print(f"[DEBUG AVANÇAR TIMEOUT] {debug_txt[-900:]}")
+                return False, "Timeout ao clicar em 'Avançar' no formulário de passageiros.", None
 
-            try:
-                page.wait_for_load_state("domcontentloaded", timeout=10000)
-            except PlaywrightTimeoutError:
-                pass
-            page.wait_for_timeout(1500)
+            # Aguardar transição efetiva para fora do formulário de passageiros
+            transitioned = False
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                page.wait_for_timeout(600)
+                curr_text = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
+                if "Não foi possível iniciar o processo de compra" in curr_text:
+                    return False, "A CP rejeitou a validação do passe ou não existem lugares elegíveis.", None
+                if "Dados dos passageiros" not in curr_text or re.search(
+                    r"Total|A\s+pagar|Pagamento|Carruagem|Lugar", curr_text, re.IGNORECASE
+                ):
+                    transitioned = True
+                    break
 
-            body_text = page.locator("body").inner_text(timeout=7000)
-            if "Não foi possível iniciar o processo de compra" in body_text:
-                return False, "A CP rejeitou a validação do passe ou não existem lugares elegíveis.", None
+            if not transitioned:
+                curr_text = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
+                print(f"[DEBUG SEM TRANSIÇÃO] {curr_text[-900:]}")
+                return False, "O formulário de passageiros não avançou após clicar em 'Avançar'.", None
 
             # -----------------------------------------------------------------
             # E. Carruagem/lugar e resumo
@@ -1541,7 +1535,6 @@ def attempt_ticket_purchase(
                 except Exception as exc:
                     print(f"[AVISO LUGAR] Não foi possível avançar após a seleção de lugar: {exc}")
                     
-
             # -----------------------------------------------------------------
             # F. Circuit breaker: só prosseguir se o total explícito for 0,00 €
             # -----------------------------------------------------------------
