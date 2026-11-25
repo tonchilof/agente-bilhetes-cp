@@ -1313,6 +1313,7 @@ def attempt_ticket_purchase(
             if not step_ok:
                 return False, step_details, None
 
+
             # -----------------------------------------------------------------
             # D. Dados do passageiro e Passe Ferroviário Verde
             # -----------------------------------------------------------------
@@ -1424,7 +1425,7 @@ def attempt_ticket_purchase(
                                 norm_txt = _normalize_text(txt)
                                 if "ferroviario" in norm_txt and "verde" in norm_txt:
                                     cand.click(timeout=4000, force=True)
-                                    page.wait_for_timeout(700)
+                                    page.wait_for_timeout(800)
                                     print(f"[DESCONTO] Selecionado: {txt}")
                                     discount_selected = True
                                     break
@@ -1444,10 +1445,13 @@ def attempt_ticket_purchase(
             if not discount_selected:
                 return False, "Não foi possível selecionar Passe Ferroviário Verde.", None
 
+            extra_filled = False
             extra_info = first_existing(
                 page,
                 [
                     "input[name*='adicional' i]",
+                    "input[id*='adicional' i]",
+                    "input[aria-label*='adicional' i]",
                     "input[placeholder*='Informação adicional' i]",
                     "input[name*='cartao' i]",
                     "input[name*='passe' i]",
@@ -1461,9 +1465,30 @@ def attempt_ticket_purchase(
             if extra_info is not None and locator_visible(extra_info, 1500):
                 try:
                     extra_info.fill(pass_code, timeout=5000)
+                    extra_filled = True
+                    print("[PASSE] Campo 'Informação adicional' preenchido.")
                 except Exception as exc:
                     return False, f"Não foi possível preencher o código do passe: {exc}", None
-            else:
+
+            if not extra_filled:
+                try:
+                    add_label = page.locator("text=/Informa[çc][aã]o adicional/i").first
+                    if add_label.count() > 0 and locator_visible(add_label, 1000):
+                        for rel_sel in (
+                            "xpath=following::input[1]",
+                            "xpath=../following::input[1]",
+                            "xpath=../../following::input[1]",
+                        ):
+                            cand = add_label.locator(rel_sel).first
+                            if cand.count() > 0 and locator_visible(cand, 800):
+                                cand.fill(pass_code, timeout=5000)
+                                extra_filled = True
+                                print("[PASSE] Campo 'Informação adicional' preenchido via rótulo.")
+                                break
+                except Exception as exc:
+                    print(f"[AVISO PASSE] Falha ao localizar 'Informação adicional': {exc}")
+
+            if not extra_filled:
                 print("[PASSE] Campo do código/número do passe não presente neste ecrã; a prosseguir.")
 
             continue_button = find_visible_button(page, ["Continuar", "Avançar", "Seguinte"])
@@ -1491,7 +1516,7 @@ def attempt_ticket_purchase(
             body_text = page.locator("body").inner_text(timeout=7000)
             if "Não foi possível iniciar o processo de compra" in body_text:
                 return False, "A CP rejeitou a validação do passe ou não existem lugares elegíveis.", None
-                
+
             # -----------------------------------------------------------------
             # E. Carruagem/lugar e resumo
             # -----------------------------------------------------------------
@@ -1507,6 +1532,7 @@ def attempt_ticket_purchase(
                     page.wait_for_timeout(1200)
                 except Exception as exc:
                     print(f"[AVISO LUGAR] Não foi possível avançar após a seleção de lugar: {exc}")
+                    
 
             # -----------------------------------------------------------------
             # F. Circuit breaker: só prosseguir se o total explícito for 0,00 €
