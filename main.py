@@ -1656,12 +1656,25 @@ def attempt_ticket_purchase(
             if not discount_selected:
                 return False, "Não foi possível selecionar Passe Ferroviário Verde.", None
 
+            
             page.wait_for_timeout(500)
-            extra_info = find_additional_info_input(page)
+            extra_info = None
+
+            # Procurar primeiro qualquer campo obrigatório visível que ainda esteja vazio
+            req_inputs = page.locator("input:visible[required]")
+            for idx in range(req_inputs.count()):
+                cand = req_inputs.nth(idx)
+                if not (cand.input_value() or "").strip():
+                    extra_info = cand
+                    break
+
+            if extra_info is None:
+                extra_info = find_additional_info_input(page)
 
             if extra_info is not None:
                 try:
                     extra_info.scroll_into_view_if_needed(timeout=3000)
+                    extra_info.click(timeout=4000)
                     extra_info.fill(pass_code, timeout=5000)
                     extra_info.dispatch_event("input")
                     extra_info.dispatch_event("change")
@@ -1680,6 +1693,7 @@ def attempt_ticket_purchase(
                     )
                 print("[PASSE] Campo 'Informação adicional' não presente neste ecrã; a prosseguir.")
 
+            
             # Garantir clique no botão 'Avançar' do formulário de passageiros
             advance_passenger_btn = find_visible_button(page, ["Avançar", "Continuar", "Seguinte"])
             if advance_passenger_btn is None:
