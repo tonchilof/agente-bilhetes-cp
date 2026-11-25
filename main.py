@@ -1688,9 +1688,6 @@ def attempt_ticket_purchase(
 
             try:
                 advance_passenger_btn.scroll_into_view_if_needed(timeout=3000)
-
-                try:
-                advance_passenger_btn.scroll_into_view_if_needed(timeout=3000)
                 if not advance_passenger_btn.is_enabled(timeout=8000):
                     vis_inputs = page.locator("input:visible")
                     states = []
@@ -1705,12 +1702,6 @@ def attempt_ticket_purchase(
                             f"{el_id}(type={el_type},filled={has_val},req={req is not None},invalid={invalid})"
                         )
                     print(f"[DEBUG INPUTS PASSAGEIRO] {', '.join(states)}")
-                    debug_txt = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
-                    print(f"[DEBUG AVANÇAR DISABLED] {debug_txt[-900:]}")
-                    return False, "Botão 'Avançar' permaneceu desativado após preencher os dados do passageiro.", None
-
-                
-                if not advance_passenger_btn.is_enabled(timeout=8000):
                     debug_txt = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
                     print(f"[DEBUG AVANÇAR DISABLED] {debug_txt[-900:]}")
                     return False, "Botão 'Avançar' permaneceu desativado após preencher os dados do passageiro.", None
