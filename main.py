@@ -288,37 +288,45 @@ def fill_station_input(page, input_locator: Locator, station_name: str) -> bool:
 
     suggestion_selectors = [
         "[role='option']",
+        "[role='listbox'] [role='option']",
         ".ui-autocomplete li",
         "[class*='autocomplete'] li",
+        "[class*='autocomplete'] [role='option']",
         "[class*='suggestion']",
         "[class*='dropdown'] li",
+        "[class*='dropdown'] [role='option']",
+        "ul li",
     ]
     target_norm = _normalize_text(station_name)
     keywords = [w for w in target_norm.replace("-", " ").split() if len(w) >= 3]
     primary_token = keywords[-1] if keywords else target_norm
 
-    for attempt in range(1, 4):
+    for attempt in range(1, 5):
         try:
+            page.wait_for_timeout(400 if attempt == 1 else 800)
+            input_locator.scroll_into_view_if_needed(timeout=4000)
             input_locator.click(timeout=5000)
             page.keyboard.press("Control+A")
             page.keyboard.press("Backspace")
-            page.wait_for_timeout(200)
-            input_locator.press_sequentially(station_name, delay=90)
-            page.wait_for_timeout(1800)
+            page.wait_for_timeout(250)
+            query_text = station_name if attempt <= 2 else (keywords[-1] if keywords else station_name)
+            input_locator.press_sequentially(query_text, delay=100)
+            page.wait_for_timeout(2200)
 
             all_suggestions = page.locator(", ".join(suggestion_selectors))
-            total = min(all_suggestions.count(), 40)
+            total = min(all_suggestions.count(), 60)
 
             best_suggestion = None
             seen_texts: list[str] = []
             for idx in range(total):
                 cand = all_suggestions.nth(idx)
                 try:
-                    if not locator_visible(cand, 400):
+                    if not locator_visible(cand, 500):
                         continue
                     cand_text = " ".join((cand.inner_text() or "").split())
-                    if cand_text:
-                        seen_texts.append(cand_text)
+                    if not cand_text or len(cand_text) > 120:
+                        continue
+                    seen_texts.append(cand_text)
                     cand_norm = _normalize_text(cand_text)
                     if target_norm in cand_norm or (primary_token and primary_token in cand_norm):
                         best_suggestion = cand
