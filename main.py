@@ -1450,6 +1450,7 @@ def attempt_ticket_purchase(
             except Exception as exc:
                 print(f"[AVISO DESCONTO] Erro ao abrir/selecionar desconto: {exc}")
 
+            
             if not discount_selected:
                 return False, "Não foi possível selecionar Passe Ferroviário Verde.", None
 
@@ -1478,13 +1479,14 @@ def attempt_ticket_purchase(
                 except Exception as exc:
                     return False, f"Não foi possível preencher o código do passe: {exc}", None
 
-if not extra_filled:
+            if not extra_filled:
                 print("[PASSE] Campo do código/número do passe não presente neste ecrã; a prosseguir.")
 
             # Garantir clique no botão 'Avançar' do formulário de passageiros
             advance_passenger_btn = find_visible_button(page, ["Avançar", "Continuar", "Seguinte"])
             if advance_passenger_btn is None:
                 return False, "Botão 'Avançar' do formulário de passageiros não encontrado.", None
+            
 
             try:
                 advance_passenger_btn.scroll_into_view_if_needed(timeout=3000)
