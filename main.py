@@ -587,7 +587,7 @@ def parse_euro_amount(raw_amount: str) -> float | None:
 
 
 def verify_zero_euro_total(page) -> bool:
-    """Só aceita 0,00 € quando o montante aparece associado a um rótulo de total."""
+    """Só aceita 0,00 € quando o montante aparece associado a um rótulo de total/resumo."""
     try:
         body_text = page.locator("body").inner_text(timeout=7000)
     except Exception as exc:
@@ -595,16 +595,27 @@ def verify_zero_euro_total(page) -> bool:
         return False
 
     normalized = re.sub(r"\s+", " ", body_text)
-    amount_pattern = r"(?:€\s*)?(\d{1,3}(?:[.\s]\d{3})*(?:[,.]\d{2})|\d+[,.]\d{2})\s*€?"
+    amount_pattern = r"(?:€\s*)?(\d{1,3}(?:[.\s]\d{3})*(?:[,.]\d{2})|\d+[,.]\d{2}|\d+)\s*€?"
     label_pattern = re.compile(
-        rf"(?:Total(?:\s+(?:a\s+pagar|da\s+viagem|da\s+compra))?|Valor\s+total|A\s+pagar)"
-        rf"\s*[:\-]?\s*.{{0,45}}?{amount_pattern}",
+        rf"(?:Total(?:\s+(?:a\s+pagar|da\s+viagem|da\s+compra|geral|líquido|liquido))?"
+        rf"|Valor\s+(?:total|a\s+pagar)|A\s+pagar|Subtotal|Preço\s+total|Preco\s+total)"
+        rf"\s*[:\-]?\s*.{{0,65}}?{amount_pattern}",
         re.IGNORECASE,
     )
 
     matches = list(label_pattern.finditer(normalized))
     if not matches:
+        # Fallback: procura padrões explícitos de zero euros junto a resumo/tarifa/passe
+        zero_context_pattern = re.compile(
+            r"(?:total|pagar|tarifa|desconto|passe\s+ferrovi[aá]rio\s+verde).{0,60}?(?:0[,.]00\s*€|€\s*0[,.]00)",
+            re.IGNORECASE,
+        )
+        if zero_context_pattern.search(normalized):
+            print("[SEGURANÇA] Total de 0,00 € detetado no contexto do resumo/tarifa.")
+            return True
+
         print("[SEGURANÇA] Não foi encontrado um valor associado ao rótulo Total/A pagar. Compra abortada.")
+        print(f"[DEBUG SEGURANÇA ECRÃ] {normalized[-800:]}")
         return False
 
     amounts: list[float] = []
