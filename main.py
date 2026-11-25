@@ -737,6 +737,87 @@ def select_green_pass(page) -> bool:
     print("[DESCONTO] Não foi possível selecionar Passe Ferroviário Verde.")
     return False
 
+def find_additional_info_input(page) -> Locator | None:
+    """Localiza o <input> associado a 'Informação adicional' por vários caminhos."""
+    label_pattern = re.compile(r"informa[çc][aã]o\s+adicional", re.IGNORECASE)
+
+    # 1. Atributos diretos ou via <label for="..."> / aria-labelledby
+    direct_selectors = [
+        "input[aria-label*='adicional' i]",
+        "input[placeholder*='adicional' i]",
+        "input[name*='adicional' i]",
+        "input[id*='adicional' i]",
+    ]
+    direct = first_existing(page, direct_selectors)
+    if direct is not None and locator_visible(direct, 1000):
+        return direct
+
+    label_el = page.locator("label, span, div, p").filter(has_text=label_pattern)
+    for idx in range(min(label_el.count(), 10)):
+        lbl = label_el.nth(idx)
+        try:
+            if not locator_visible(lbl, 500):
+                continue
+            for_attr = (lbl.get_attribute("for") or "").strip()
+            if for_attr:
+                by_id = page.locator(f"[id='{for_attr}']").first
+                if by_id.count() > 0 and locator_visible(by_id, 600):
+                    return by_id
+
+            lbl_id = (lbl.get_attribute("id") or "").strip()
+            if lbl_id:
+                by_labelledby = page.locator(f"[aria-labelledby~='{lbl_id}']").first
+                if by_labelledby.count() > 0 and locator_visible(by_labelledby, 600):
+                    return by_labelledby
+
+            # 2. Subir até 5 ancestrais e procurar input visível no contentor
+            container = lbl
+            for _ in range(5):
+                container = container.locator("..")
+                if container.count() == 0:
+                    break
+                inp = container.locator(
+                    "input:visible:not([type='hidden']):not([type='checkbox']):not([type='radio'])"
+                ).first
+                if inp.count() > 0 and locator_visible(inp, 500):
+                    return inp
+        except Exception:
+            continue
+
+    # 3. Proximidade geométrica ao texto 'Informação adicional'
+    text_node = page.get_by_text(label_pattern).first
+    try:
+        if text_node.count() > 0 and locator_visible(text_node, 800):
+            t_box = text_node.bounding_box()
+            if t_box:
+                t_cx = t_box["x"] + t_box["width"] / 2
+                t_cy = t_box["y"] + t_box["height"] / 2
+                inputs = page.locator(
+                    "input:visible:not([type='hidden']):not([type='checkbox']):not([type='radio'])"
+                )
+                best_inp = None
+                best_dist = float("inf")
+                for i in range(inputs.count()):
+                    cand = inputs.nth(i)
+                    box = cand.bounding_box()
+                    if not box:
+                        continue
+                    c_cx = box["x"] + box["width"] / 2
+                    c_cy = box["y"] + box["height"] / 2
+                    # Aceita campos à direita na mesma linha ou logo abaixo
+                    same_row_right = abs(c_cy - t_cy) < 60 and c_cx >= t_box["x"]
+                    below_near = 0 <= (c_cy - t_cy) < 140 and abs(c_cx - t_cx) < 350
+                    if same_row_right or below_near:
+                        dist = ((c_cx - t_cx) ** 2 + (c_cy - t_cy) ** 2) ** 0.5
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_inp = cand
+                if best_inp is not None:
+                    return best_inp
+    except Exception:
+        pass
+
+    return None
 
 def set_checkbox_for_statement(page, pattern: re.Pattern[str], description: str) -> bool:
     """Marca e verifica uma declaração específica, sem tocar em opções de marketing."""
@@ -1450,38 +1531,52 @@ def attempt_ticket_purchase(
             except Exception as exc:
                 print(f"[AVISO DESCONTO] Erro ao abrir/selecionar desconto: {exc}")
 
-            
+
             if not discount_selected:
                 return False, "Não foi possível selecionar Passe Ferroviário Verde.", None
 
-            extra_filled = False
-            extra_info = first_existing(
-                page,
-                [
-                    "input[name*='adicional' i]",
-                    "input[id*='adicional' i]",
-                    "input[aria-label*='adicional' i]",
-                    "input[placeholder*='Informação adicional' i]",
-                    "input[name*='cartao' i]",
-                    "input[name*='passe' i]",
-                    "input[id*='cartao' i]",
-                    "input[id*='passe' i]",
-                    "input[name*='verde' i]",
-                    "input[placeholder*='passe' i]",
-                    "input[placeholder*='cartão' i]",
-                ],
-            )
-            if extra_info is not None and locator_visible(extra_info, 1500):
+            page.wait_for_timeout(500)
+            extra_info = find_additional_info_input(page)
+
+            if extra_info is not None:
                 try:
+                    extra_info.scroll_into_view_if_needed(timeout=3000)
                     extra_info.fill(pass_code, timeout=5000)
-                    extra_filled = True
-                    print("[PASSE] Campo 'Informação adicional' preenchido.")
+                    print("[PASSE] Campo 'Informação adicional' preenchido com CP_PASS_CODE.")
                 except Exception as exc:
                     return False, f"Não foi possível preencher o código do passe: {exc}", None
+            else:
+                curr_body = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
+                if re.search(r"informa[çc][aã]o\s+adicional", curr_body, re.IGNORECASE):
+                    return (
+                        False,
+                        "O campo 'Informação adicional' aparece no ecrã, mas o respetivo <input> não foi localizado.",
+                        None,
+                    )
+                print("[PASSE] Campo 'Informação adicional' não presente neste ecrã; a prosseguir.")
 
-            if not extra_filled:
-                print("[PASSE] Campo do código/número do passe não presente neste ecrã; a prosseguir.")
+            # Garantir clique no botão 'Avançar' do formulário de passageiros
+            advance_passenger_btn = find_visible_button(page, ["Avançar", "Continuar", "Seguinte"])
+            if advance_passenger_btn is None:
+                return False, "Botão 'Avançar' do formulário de passageiros não encontrado.", None
 
+
+            try:
+                advance_passenger_btn.scroll_into_view_if_needed(timeout=3000)
+                if not advance_passenger_btn.is_enabled(timeout=8000):
+                    debug_txt = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
+                    print(f"[DEBUG AVANÇAR DISABLED] {debug_txt[-900:]}")
+                    return False, "Botão 'Avançar' permaneceu desativado após preencher os dados do passageiro.", None
+
+                print("[PASSAGEIROS] A clicar em 'Avançar' para prosseguir.")
+                advance_passenger_btn.click(timeout=8000)
+            except PlaywrightTimeoutError:
+                debug_txt = " ".join((page.locator("body").inner_text(timeout=3000) or "").split())
+                print(f"[DEBUG AVANÇAR TIMEOUT] {debug_txt[-900:]}")
+                return False, "Timeout ao clicar em 'Avançar' no formulário de passageiros.", None
+                
+
+            
             # Garantir clique no botão 'Avançar' do formulário de passageiros
             advance_passenger_btn = find_visible_button(page, ["Avançar", "Continuar", "Seguinte"])
             if advance_passenger_btn is None:
